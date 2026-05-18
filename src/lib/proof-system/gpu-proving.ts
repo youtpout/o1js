@@ -2,7 +2,7 @@ export { setGpuProver, getGpuProver, clearGpuProver };
 export type { GpuProver, GpuProverContext };
 
 type GpuProverContext = {
-  prover: (publicInputFields: unknown) => Promise<unknown>;
+  prover: unknown;
   lazyProof: unknown;
   proverData: {
     transaction: unknown;
