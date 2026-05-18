@@ -19,7 +19,7 @@ import {
   getAccountPreconditions,
 } from './precondition.js';
 import { dummyBase64Proof, Empty, Prover } from '../../proof-system/zkprogram.js';
-import { getGpuProver } from '../../proof-system/gpu-proving.js';
+import { getGpuProver, withGpuProvingScope } from '../../proof-system/gpu-proving.js';
 import { Proof } from '../../proof-system/proof.js';
 import { Memo } from '../../../mina-signer/src/memo.js';
 import {
@@ -2021,26 +2021,28 @@ async function createZkappProof(
   let publicInput = accountUpdate.toPublicInput(transaction);
   let publicInputFields = MlFieldConstArray.to(ZkappPublicInput.toFields(publicInput));
   let cpuFallback = async () => {
-    let [, , proof] = await zkAppProver.run(
-      [accountUpdate.publicKey, accountUpdate.tokenId, ...args],
-      { transaction, accountUpdate, index },
-      async () => {
-        let id = memoizationContext.enter({
-          memoized,
-          currentIndex: 0,
-          blindingValue,
-        });
-        try {
-          return await prover(publicInputFields);
-        } catch (err) {
-          console.error(`Error when proving ${ZkappClass.name}.${methodName}()`);
-          throw err;
-        } finally {
-          memoizationContext.leave(id);
+    return await withGpuProvingScope(gpuProving, async () => {
+      let [, , proof] = await zkAppProver.run(
+        [accountUpdate.publicKey, accountUpdate.tokenId, ...args],
+        { transaction, accountUpdate, index },
+        async () => {
+          let id = memoizationContext.enter({
+            memoized,
+            currentIndex: 0,
+            blindingValue,
+          });
+          try {
+            return await prover(publicInputFields);
+          } catch (err) {
+            console.error(`Error when proving ${ZkappClass.name}.${methodName}()`);
+            throw err;
+          } finally {
+            memoizationContext.leave(id);
+          }
         }
-      }
-    );
-    return proof;
+      );
+      return proof;
+    });
   };
 
   if (gpuProving) {
@@ -2050,14 +2052,16 @@ async function createZkappProof(
         'gpuProving was requested, but no GPU prover has been registered. Register one with setGpuProver() before calling transaction.prove({ gpuProving: true }).'
       );
     }
-    let proof = await gpuProver({
-      prover,
-      lazyProof: { methodName, args, ZkappClass, memoized, blindingValue },
-      proverData: { transaction, accountUpdate, index },
-      publicInput,
-      publicInputFields,
-      cpuFallback,
-    });
+    let proof = await withGpuProvingScope(true, async () =>
+      gpuProver({
+        prover,
+        lazyProof: { methodName, args, ZkappClass, memoized, blindingValue },
+        proverData: { transaction, accountUpdate, index },
+        publicInput,
+        publicInputFields,
+        cpuFallback,
+      })
+    );
     let maxProofsVerified = await ZkappClass.getMaxProofsVerified();
     const Proof = ZkappClass.Proof();
     return new Proof({

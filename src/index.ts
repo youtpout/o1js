@@ -130,10 +130,16 @@ export type { NetworkId } from './mina-signer/mina-signer.js';
 export { setNumberOfWorkers } from './lib/proof-system/workers.js';
 export {
   clearGpuProver,
+  clearGpuMsmRunner,
   getGpuProver,
+  getGpuMsmRunner,
+  isGpuProvingEnabled,
   setGpuProver,
+  setGpuMsmRunner,
   type GpuProver,
   type GpuProverContext,
+  type GpuMsmRunner,
+  type GpuMsmContext,
 } from './lib/proof-system/gpu-proving.js';
 export { Experimental };
 
