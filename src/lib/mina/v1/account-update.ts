@@ -19,6 +19,7 @@ import {
   getAccountPreconditions,
 } from './precondition.js';
 import { dummyBase64Proof, Empty, Prover } from '../../proof-system/zkprogram.js';
+import { getGpuProver } from '../../proof-system/gpu-proving.js';
 import { Proof } from '../../proof-system/proof.js';
 import { Memo } from '../../../mina-signer/src/memo.js';
 import {
@@ -1950,7 +1951,7 @@ let ZkappPublicInput = provablePure({ accountUpdate: Field, calls: Field });
 
 async function addMissingProofs(
   zkappCommand: ZkappCommand,
-  { proofsEnabled = true }
+  { proofsEnabled = true, gpuProving = false }
 ): Promise<{
   zkappCommand: ZkappCommandProved;
   proofs: (Proof<ZkappPublicInput, Empty> | undefined)[];
@@ -1961,7 +1962,12 @@ async function addMissingProofs(
   let accountUpdatesProved: AccountUpdateProved[] = [];
   let proofs: (Proof<ZkappPublicInput, Empty> | undefined)[] = [];
   for (let i = 0; i < accountUpdates.length; i++) {
-    let { accountUpdateProved, proof } = await addProof(zkappCommand, i, proofsEnabled);
+    let { accountUpdateProved, proof } = await addProof(
+      zkappCommand,
+      i,
+      proofsEnabled,
+      gpuProving
+    );
     accountUpdatesProved.push(accountUpdateProved);
     proofs.push(proof);
   }
@@ -1971,7 +1977,12 @@ async function addMissingProofs(
   };
 }
 
-async function addProof(transaction: ZkappCommand, index: number, proofsEnabled: boolean) {
+async function addProof(
+  transaction: ZkappCommand,
+  index: number,
+  proofsEnabled: boolean,
+  gpuProving = false
+) {
   let accountUpdate = transaction.accountUpdates[index];
   accountUpdate = AccountUpdate.clone(accountUpdate);
 
@@ -1992,7 +2003,7 @@ async function addProof(transaction: ZkappCommand, index: number, proofsEnabled:
   let lazyProof: LazyProof = accountUpdate.lazyAuthorization;
   let prover = getZkappProver(lazyProof);
   let proverData = { transaction, accountUpdate, index };
-  let proof = await createZkappProof(prover, lazyProof, proverData);
+  let proof = await createZkappProof(prover, lazyProof, proverData, { gpuProving });
 
   let accountUpdateProved = Authorization.setProof(
     accountUpdate,
@@ -2004,10 +2015,35 @@ async function addProof(transaction: ZkappCommand, index: number, proofsEnabled:
 async function createZkappProof(
   prover: Pickles.Prover,
   { methodName, args, ZkappClass, memoized, blindingValue }: LazyProof,
-  { transaction, accountUpdate, index }: ZkappProverData
+  { transaction, accountUpdate, index }: ZkappProverData,
+  { gpuProving = false }: { gpuProving?: boolean } = {}
 ): Promise<Proof<ZkappPublicInput, Empty>> {
   let publicInput = accountUpdate.toPublicInput(transaction);
   let publicInputFields = MlFieldConstArray.to(ZkappPublicInput.toFields(publicInput));
+
+  if (gpuProving) {
+    let gpuProver = getGpuProver();
+    if (gpuProver === undefined) {
+      throw Error(
+        'gpuProving was requested, but no GPU prover has been registered. Register one with setGpuProver() before calling transaction.prove({ gpuProving: true }).'
+      );
+    }
+    let proof = await gpuProver({
+      prover,
+      lazyProof: { methodName, args, ZkappClass, memoized, blindingValue },
+      proverData: { transaction, accountUpdate, index },
+      publicInput,
+      publicInputFields,
+    });
+    let maxProofsVerified = await ZkappClass.getMaxProofsVerified();
+    const Proof = ZkappClass.Proof();
+    return new Proof({
+      publicInput,
+      publicOutput: undefined,
+      proof,
+      maxProofsVerified,
+    });
+  }
 
   let [, , proof] = await zkAppProver.run(
     [accountUpdate.publicKey, accountUpdate.tokenId, ...args],

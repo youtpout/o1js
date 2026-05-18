@@ -128,6 +128,13 @@ export { Crypto } from './lib/provable/crypto/crypto.js';
 export type { NetworkId } from './mina-signer/mina-signer.js';
 
 export { setNumberOfWorkers } from './lib/proof-system/workers.js';
+export {
+  clearGpuProver,
+  getGpuProver,
+  setGpuProver,
+  type GpuProver,
+  type GpuProverContext,
+} from './lib/proof-system/gpu-proving.js';
 export { Experimental };
 
 // experimental APIs

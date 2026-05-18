@@ -45,9 +45,14 @@ export {
   type PendingTransaction,
   type PendingTransactionPromise,
   type PendingTransactionStatus,
+  type ProveOptions,
   type RejectedTransaction,
   type TransactionPromise,
   type WaitForFinalityOptions,
+};
+
+type ProveOptions = {
+  gpuProving?: boolean;
 };
 
 type TransactionCommon = {
@@ -175,7 +180,7 @@ type Transaction<Proven extends boolean, Signed extends boolean> = TransactionCo
          * await transaction.prove();
          * ```
          */
-        prove(): Promise<Transaction<true, Signed>>;
+        prove(options?: ProveOptions): Promise<Transaction<true, Signed>>;
       }
     : {
         /** The proofs generated as the result of calling `prove`. */
@@ -471,7 +476,7 @@ type TransactionPromise<Proven extends boolean, Signed extends boolean> = Promis
          * new `TransactionPromise` with the field `proofPromise` containing
          * a promise which resolves to the proof array.
          */
-        prove(): TransactionPromise<true, Signed>;
+        prove(options?: ProveOptions): TransactionPromise<true, Signed>;
       }
     : {
         /**
@@ -503,9 +508,9 @@ function toTransactionPromise<Proven extends boolean, Signed extends boolean>(
     send() {
       return toPendingTransactionPromise(() => pending.then((v) => v.send()));
     },
-    prove() {
+    prove(options?: ProveOptions) {
       return toTransactionPromise(() =>
-        pending.then((v) => (v as never as Transaction<false, Signed>).prove())
+        pending.then((v) => (v as never as Transaction<false, Signed>).prove(options))
       );
     },
     proofs() {
@@ -635,10 +640,11 @@ function newTransaction(transaction: ZkappCommand, proofsEnabled?: boolean) {
       self.transaction = addMissingSignatures(self.transaction, privateKeys);
       return self;
     },
-    prove() {
+    prove(options: ProveOptions = {}) {
       return toTransactionPromise(async () => {
         let { zkappCommand, proofs } = await addMissingProofs(self.transaction, {
           proofsEnabled,
+          gpuProving: options.gpuProving,
         });
         self.transaction = zkappCommand;
         return Object.assign(self as never as Transaction<true, false>, {
