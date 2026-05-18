@@ -2020,6 +2020,28 @@ async function createZkappProof(
 ): Promise<Proof<ZkappPublicInput, Empty>> {
   let publicInput = accountUpdate.toPublicInput(transaction);
   let publicInputFields = MlFieldConstArray.to(ZkappPublicInput.toFields(publicInput));
+  let cpuFallback = async () => {
+    let [, , proof] = await zkAppProver.run(
+      [accountUpdate.publicKey, accountUpdate.tokenId, ...args],
+      { transaction, accountUpdate, index },
+      async () => {
+        let id = memoizationContext.enter({
+          memoized,
+          currentIndex: 0,
+          blindingValue,
+        });
+        try {
+          return await prover(publicInputFields);
+        } catch (err) {
+          console.error(`Error when proving ${ZkappClass.name}.${methodName}()`);
+          throw err;
+        } finally {
+          memoizationContext.leave(id);
+        }
+      }
+    );
+    return proof;
+  };
 
   if (gpuProving) {
     let gpuProver = getGpuProver();
@@ -2034,6 +2056,7 @@ async function createZkappProof(
       proverData: { transaction, accountUpdate, index },
       publicInput,
       publicInputFields,
+      cpuFallback,
     });
     let maxProofsVerified = await ZkappClass.getMaxProofsVerified();
     const Proof = ZkappClass.Proof();
@@ -2045,25 +2068,7 @@ async function createZkappProof(
     });
   }
 
-  let [, , proof] = await zkAppProver.run(
-    [accountUpdate.publicKey, accountUpdate.tokenId, ...args],
-    { transaction, accountUpdate, index },
-    async () => {
-      let id = memoizationContext.enter({
-        memoized,
-        currentIndex: 0,
-        blindingValue,
-      });
-      try {
-        return await prover(publicInputFields);
-      } catch (err) {
-        console.error(`Error when proving ${ZkappClass.name}.${methodName}()`);
-        throw err;
-      } finally {
-        memoizationContext.leave(id);
-      }
-    }
-  );
+  let proof = await cpuFallback();
 
   let maxProofsVerified = await ZkappClass.getMaxProofsVerified();
   const Proof = ZkappClass.Proof();

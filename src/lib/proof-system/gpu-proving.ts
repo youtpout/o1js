@@ -11,6 +11,7 @@ type GpuProverContext = {
   };
   publicInput: unknown;
   publicInputFields: unknown;
+  cpuFallback: () => Promise<unknown>;
 };
 
 type GpuProver = ((context: GpuProverContext) => Promise<unknown>) | undefined;
