@@ -33,8 +33,8 @@ type GpuMsmContext = {
   cpuFallback?: () => Promise<unknown>;
 };
 
-type GpuProver = ((context: GpuProverContext) => Promise<unknown>) | undefined;
-type GpuMsmRunner = ((context: GpuMsmContext) => Promise<unknown>) | undefined;
+type GpuProver = ((context: GpuProverContext) => unknown | Promise<unknown>) | undefined;
+type GpuMsmRunner = ((context: GpuMsmContext) => unknown | Promise<unknown>) | undefined;
 
 let gpuProver: GpuProver;
 let gpuMsmRunner: GpuMsmRunner;
