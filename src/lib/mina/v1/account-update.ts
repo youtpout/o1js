@@ -2018,21 +2018,41 @@ async function createZkappProof(
   { transaction, accountUpdate, index }: ZkappProverData,
   { gpuProving = false }: { gpuProving?: boolean } = {}
 ): Promise<Proof<ZkappPublicInput, Empty>> {
+  let nowMs = () =>
+    typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now();
+  let logPhase = (phase: string, startMs: number) => {
+    let elapsedMs = nowMs() - startMs;
+    console.log(
+      `[o1js prove-gap] update=${index} phase=${phase} elapsed_ms=${elapsedMs.toFixed(2)}`
+    );
+    return nowMs();
+  };
+
+  let totalStartMs = nowMs();
   let publicInput = accountUpdate.toPublicInput(transaction);
+  let phaseStartMs = logPhase('public_input', totalStartMs);
   let publicInputFields = MlFieldConstArray.to(ZkappPublicInput.toFields(publicInput));
+  phaseStartMs = logPhase('public_input_fields', phaseStartMs);
   let cpuFallback = async () => {
-    return await withGpuProvingScope(gpuProving, async () => {
+    let cpuFallbackStartMs = nowMs();
+    let proof = await withGpuProvingScope(gpuProving, async () => {
+      let zkAppRunStartMs = nowMs();
       let [, , proof] = await zkAppProver.run(
         [accountUpdate.publicKey, accountUpdate.tokenId, ...args],
         { transaction, accountUpdate, index },
         async () => {
+          let proverStartMs = nowMs();
           let id = memoizationContext.enter({
             memoized,
             currentIndex: 0,
             blindingValue,
           });
           try {
-            return await prover(publicInputFields);
+            let proof = await prover(publicInputFields);
+            let _ = logPhase('prover(publicInputFields)', proverStartMs);
+            return proof;
           } catch (err) {
             console.error(`Error when proving ${ZkappClass.name}.${methodName}()`);
             throw err;
@@ -2041,8 +2061,11 @@ async function createZkappProof(
           }
         }
       );
+      let _ = logPhase('zkAppProver.run', zkAppRunStartMs);
       return proof;
     });
+    let _ = logPhase('cpu_fallback_total', cpuFallbackStartMs);
+    return proof;
   };
 
   if (gpuProving) {
@@ -2052,6 +2075,7 @@ async function createZkappProof(
         'gpuProving was requested, but no GPU prover has been registered. Register one with setGpuProver() before calling transaction.prove({ gpuProving: true }).'
       );
     }
+    let gpuProverStartMs = nowMs();
     let proof = await withGpuProvingScope(true, async () =>
       gpuProver({
         prover,
@@ -2062,26 +2086,38 @@ async function createZkappProof(
         cpuFallback,
       })
     );
+    phaseStartMs = logPhase('gpu_prover_total', gpuProverStartMs);
     let maxProofsVerified = await ZkappClass.getMaxProofsVerified();
+    phaseStartMs = logPhase('getMaxProofsVerified', phaseStartMs);
     const Proof = ZkappClass.Proof();
-    return new Proof({
+    phaseStartMs = logPhase('Proof_factory', phaseStartMs);
+    let wrappedProof = new Proof({
       publicInput,
       publicOutput: undefined,
       proof,
       maxProofsVerified,
     });
+    let _ = logPhase('wrap_proof_object', phaseStartMs);
+    let _total = logPhase('createZkappProof_total', totalStartMs);
+    return wrappedProof;
   }
 
   let proof = await cpuFallback();
+  phaseStartMs = logPhase('cpu_prover_total', phaseStartMs);
 
   let maxProofsVerified = await ZkappClass.getMaxProofsVerified();
+  phaseStartMs = logPhase('getMaxProofsVerified', phaseStartMs);
   const Proof = ZkappClass.Proof();
-  return new Proof({
+  phaseStartMs = logPhase('Proof_factory', phaseStartMs);
+  let wrappedProof = new Proof({
     publicInput,
     publicOutput: undefined,
     proof,
     maxProofsVerified,
   });
+  let _ = logPhase('wrap_proof_object', phaseStartMs);
+  let _total = logPhase('createZkappProof_total', totalStartMs);
+  return wrappedProof;
 }
 
 function getZkappProver({ methodName, ZkappClass }: LazyProof) {
