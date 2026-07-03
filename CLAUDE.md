@@ -11,3 +11,7 @@ Protocol.
 Read `AGENT.md` for build commands, architecture, circuit model, common
 pitfalls, and file organization. Read `AGENT_LOG.md` for hard-won lessons from
 previous agent sessions.
+
+**Rust migration (branch `rust`):** read `RUST_MIGRATION.md` for the plan and
+status of replacing the `src/mina` submodule with direct proof-systems
+bindings (snarky-rs).
