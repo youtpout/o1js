@@ -36,7 +36,8 @@ Rust contre l'OCaml canonique, voir `mina/src/lib/snarky/CLAUDE.md`).
 | Builder `@o1js/native` depuis notre proof-systems (sans `src/mina`) | ✅ | `PROOF_SYSTEMS_ROOT=~/Projects/proof-systems npm run build:native` bypasse `src/mina` (napi build direct) ; **smoke test Node validé** : create → add_basic_constraint(kind) → finalize → digest → gate vector natif |
 | Encodage FFI JS | ✅ | lincoms en buffers plats parallèles (`sizes u32[]`, `has_constant u8[]`, `constants`, `coeffs` 32o/élément, `indices u32[]`) — les typed arrays dans des objets JS ne passent pas avec napi-rs |
 | Exposer via kimchi-wasm (navigateur) | ⬜ | même API, wasm-bindgen |
-| Brancher `Provable`/`constraintSystem()` d'o1js sur la surface native | ⬜ | derrière un flag (`O1JS_REQUIRE_NATIVE_BINDINGS` existe déjà) pour comparer avec la voie js_of_ocaml |
+| Adaptateur TS `src/native/snarky.ts` | ✅ | `NativeFpConstraintSystem` : aplatissement des arbres `FieldVar` (`flattenFieldVar` = `Cvar.to_constant_and_terms`), encodeur batch, toutes les contraintes, `toJson` via le sérialiseur kimchi, `computeWitness` (bigints JS → colonnes calculées en Rust). **Smoke test complet validé** (rows/digest/json/witness) |
+| Brancher `Provable`/`constraintSystem()` d'o1js sur l'adaptateur | ⬜ | intercepter au niveau de `provable-context.ts` (enterConstraintSystem) derrière un flag ; comparer le circuit JSON natif vs js_of_ocaml sur un même circuit |
 | Parité de VK : circuits o1js compilés via natif == via js_of_ocaml | ⬜ | même critère que la parité mina ; bloquant pour la compatibilité on-chain |
 | **Porter Pickles en Rust** (step/wrap, side-loaded keys, feature flags) | ⬜ | LE gros chantier — sans lui, pas de ZkProgram/SmartContract sans mina |
 | Logique transactionnelle : basculer sur mina-tx-type/mina-hasher/mina-signer Rust | ⬜ | compléter les crates existants si besoin |
