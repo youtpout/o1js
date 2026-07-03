@@ -30,8 +30,8 @@ Rust contre l'OCaml canonique, voir `mina/src/lib/snarky/CLAUDE.md`).
 
 | Étape | Statut | Notes |
 |---|---|---|
-| Inventaire précis de la surface `Snarky.*` consommée par o1js (`src/bindings/js`, `src/lib/provable`) | ⬜ | quelles fonctions js_of_ocaml sont réellement appelées (exists, asProver, constraintSystem, poseidon…) |
-| Exposer le crate `snarky` via kimchi-napi (Node) | ⬜ | même surface que les stubs OCaml : create/add_*/finalize/digest/to_gate_vector/compute_witness ; cvars aplatis `(constant, [(coeff, idx)])` |
+| Inventaire de la surface `Snarky.*` | ✅ | ~35 fonctions : `run.*` (RunState), `field.*` (assertEqual/readVar/…), `gates.*` (generic, ecAdd, rangeCheck0/1, xor, rotate, lookup, foreignFieldAdd/Mul, raw, addRuntimeTableConfig), `constraintSystem.*` (rows/digest/toJson), `poseidon.*` (update/sponge/hashToGroup), `circuit.*` (compile/prove/verify/keypair), `group.scaleFastUnpack` — mapping quasi 1:1 sur le crate snarky |
+| Exposer le crate `snarky` via kimchi-napi (Node) — **cœur fait** | 🟨 | proof-systems `bc2b5fb265` : `kimchi-napi/src/snarky.rs` — create/set_primary_input_size/add_{boolean,equal,square,r1cs}/finalize/digest/to_gate_vector/compute_witness (Fp+Fq), lincoms en `(constant?, coeffs bytes[], indices u32[])`. Reste : les gates kimchi custom (generic/poseidon/ec/range/xor/rot/ff — recopier depuis kimchi-stubs), add_row générique |
 | Exposer via kimchi-wasm (navigateur) | ⬜ | même API, wasm-bindgen |
 | Brancher `Provable`/`constraintSystem()` d'o1js sur la surface native | ⬜ | derrière un flag (`O1JS_REQUIRE_NATIVE_BINDINGS` existe déjà) pour comparer avec la voie js_of_ocaml |
 | Parité de VK : circuits o1js compilés via natif == via js_of_ocaml | ⬜ | même critère que la parité mina ; bloquant pour la compatibilité on-chain |
