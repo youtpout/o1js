@@ -11,15 +11,35 @@ TARGET_SLUG=$NODE_PLATFORM-$NODE_ARCH
 
 info "building bindings for $TARGET_SLUG"
 
-KIMCHI_PATH=./src/mina/src/lib/crypto/kimchi_bindings/js/native
-BUILT_PATH=./src/mina/src/lib/crypto/kimchi_bindings/js/native/artifacts
 BINDINGS_PATH=./native/$TARGET_SLUG/
 
 mkdir -p $BINDINGS_PATH
 
-info "building native Kimchi bindings..."
+if [ -n "${PROOF_SYSTEMS_ROOT:-}" ]; then
+  # rust migration path: build kimchi-napi straight from proof-systems,
+  # without going through the src/mina submodule (see RUST_MIGRATION.md)
+  info "building native Kimchi bindings from $PROOF_SYSTEMS_ROOT (direct)..."
+  BUILT_PATH=./native/.build/$TARGET_SLUG
+  mkdir -p $BUILT_PATH
+  napi build \
+      --manifest-path $PROOF_SYSTEMS_ROOT/Cargo.toml \
+      --package kimchi-napi \
+      --output-dir $BUILT_PATH \
+      --release \
+      --esm
+  # napi names the addon index.node when built without the package.json
+  # binaryName config; normalize to the name the package expects
+  if [ -f $BUILT_PATH/index.node ]; then
+    mv $BUILT_PATH/index.node $BUILT_PATH/kimchi_napi.node
+  fi
+else
+  KIMCHI_PATH=./src/mina/src/lib/crypto/kimchi_bindings/js/native
+  BUILT_PATH=./src/mina/src/lib/crypto/kimchi_bindings/js/native/artifacts
 
-dune build $KIMCHI_PATH
+  info "building native Kimchi bindings..."
+
+  dune build $KIMCHI_PATH
+fi
 
 info "creating package for $TARGET_SLUG bindings..."
 
