@@ -74,6 +74,14 @@ export type { DeployArgs } from './lib/mina/v1/zkapp.js';
 export { Cache, CacheHeader } from './lib/proof-system/cache.js';
 export { FeatureFlags } from './lib/proof-system/feature-flags.js';
 export { DynamicProof, Proof, type ProofBase } from './lib/proof-system/proof.js';
+export {
+  assertRustPicklesJsonProof,
+  rustPicklesProofFromJSON,
+  rustPicklesProofFromJSONString,
+  rustPicklesProofToJSON,
+  rustPicklesProofToJSONString,
+} from './lib/proof-system/rust-pickles.js';
+export type { RustPicklesJsonProof, RustPicklesProof } from './lib/proof-system/rust-pickles.js';
 export { VerificationKey } from './lib/proof-system/verification-key.js';
 export { Empty, SelfProof, Undefined, verify, Void } from './lib/proof-system/zkprogram.js';
 export type { JsonProof } from './lib/proof-system/zkprogram.js';
@@ -208,7 +216,7 @@ namespace Experimental {
    * - `root`: The root of the current Merkle tree
    * - `actionState`: The hash pointing to the list of actions that have been applied to form the current Merkle tree
    */
-  export class OffchainStateCommitments extends OffchainState_.OffchainStateCommitments { }
+  export class OffchainStateCommitments extends OffchainState_.OffchainStateCommitments {}
 
   // batch reducer
 
@@ -236,7 +244,7 @@ namespace Experimental {
     ActionType extends Actionable<any>,
     BatchSize extends number = number,
     Action = InferProvable<ActionType>,
-  > extends BatchReducer_.BatchReducer<ActionType, BatchSize, Action> { }
+  > extends BatchReducer_.BatchReducer<ActionType, BatchSize, Action> {}
 
   /**
    * Provable type that represents a batch of actions.
