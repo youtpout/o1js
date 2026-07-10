@@ -7,6 +7,7 @@
 import { Field, Provable } from '../index.js';
 import {
   proveRecordedBaseCase,
+  proveRecordedN,
   proveRecordedN1,
   verifyRecordedBaseCase,
   verifyRecordedN1,
@@ -37,4 +38,11 @@ let n1 = await proveRecordedN1(circuit);
 console.log(`n1 proof in ${Date.now() - t0}ms, appState =`, n1.appState);
 console.log('standalone verify (n1):', await verifyRecordedN1(n1));
 if (!(await verifyRecordedN1(n1))) throw Error('n1 verification failed');
+
+console.log('recording + proving N2 stable cycle...');
+t0 = Date.now();
+let n2 = await proveRecordedN(circuit, 2);
+console.log(`n2 proof in ${Date.now() - t0}ms, appState =`, n2.appState);
+console.log('standalone verify (n2):', await verifyRecordedN1(n2));
+if (!(await verifyRecordedN1(n2))) throw Error('n2 verification failed');
 console.log('OK');

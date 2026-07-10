@@ -24,13 +24,16 @@ export {
   recordCircuit,
   proveRecordedBaseCase,
   proveRecordedBaseCaseKeep,
+  proveRecordedN,
   proveRecordedN1,
   proveRecordedN1Over,
+  proveRecordedStableN1,
   verifyRecordedBaseCase,
   verifyRecordedN1,
   type RecordedCircuitJson,
   type RecordedProofResult,
   type RecordedN1ProofResult,
+  type RecordedStableN1ProofResult,
   type RecordedBaseProofHandle,
 };
 
@@ -90,6 +93,10 @@ type RecordedN1ProofResult = RecordedProofResult & {
   challengePolynomialCommitment: [string, string];
   oldBulletproofChallenges: string[];
   dlogPlonkIndex: [string, string][];
+};
+
+type RecordedStableN1ProofResult = RecordedN1ProofResult & {
+  stableCycles: number;
 };
 
 /**
@@ -351,6 +358,11 @@ type NativePickles = {
   rust_pickles_prove_recorded_base_keep?: (circuit: string, witness: string[]) => unknown;
   rust_pickles_recorded_base_envelope?: (handle: unknown) => string;
   rust_pickles_prove_recorded_n1?: (circuit: string, witness: string[]) => string;
+  rust_pickles_prove_recorded_stable_n1?: (
+    circuit: string,
+    witness: string[],
+    additionalStableCycles: number
+  ) => string;
   rust_pickles_prove_recorded_n1_over?: (
     handle: unknown,
     circuit: string,
@@ -442,6 +454,50 @@ async function proveRecordedN1(
   }
   let { circuit, witness } = await recordCircuit(f);
   return JSON.parse(native.rust_pickles_prove_recorded_n1(JSON.stringify(circuit), witness));
+}
+
+/**
+ * Records `f` and proves it through the stable same-field N1 recursion loop.
+ * `additionalStableCycles = 0` means two recursive cycles after the base
+ * proof; each increment adds one more stable recursive cycle.
+ */
+async function proveRecordedStableN1(
+  f: () => Field[] | Promise<Field[]>,
+  additionalStableCycles = 0
+): Promise<RecordedStableN1ProofResult> {
+  if (!Number.isInteger(additionalStableCycles) || additionalStableCycles < 0) {
+    throw Error('additionalStableCycles must be a non-negative integer');
+  }
+  let native = await nativePickles();
+  if (!native.rust_pickles_prove_recorded_stable_n1) {
+    throw Error(
+      '@o1js/native does not expose rust_pickles_prove_recorded_stable_n1 — rebuild it.'
+    );
+  }
+  let { circuit, witness } = await recordCircuit(f);
+  return JSON.parse(
+    native.rust_pickles_prove_recorded_stable_n1(
+      JSON.stringify(circuit),
+      witness,
+      additionalStableCycles
+    )
+  );
+}
+
+/**
+ * Records `f` and proves it with `recursiveCycles` recursive Pickles cycles
+ * after the base proof. `1` uses the existing N1 path; `2+` uses the stable
+ * same-field recursion loop.
+ */
+async function proveRecordedN(
+  f: () => Field[] | Promise<Field[]>,
+  recursiveCycles: number
+): Promise<RecordedN1ProofResult | RecordedStableN1ProofResult> {
+  if (!Number.isInteger(recursiveCycles) || recursiveCycles < 1) {
+    throw Error('recursiveCycles must be a positive integer');
+  }
+  if (recursiveCycles === 1) return proveRecordedN1(f);
+  return proveRecordedStableN1(f, recursiveCycles - 2);
 }
 
 /** Verifies a base-case recorded proof standalone against its embedded side-loaded key. */
