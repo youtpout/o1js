@@ -27,12 +27,15 @@ export {
   proveRecordedN,
   proveRecordedN1,
   proveRecordedN1Over,
+  proveRecordedN2,
   proveRecordedStableN1,
   verifyRecordedBaseCase,
   verifyRecordedN1,
+  verifyRecordedN2,
   type RecordedCircuitJson,
   type RecordedProofResult,
   type RecordedN1ProofResult,
+  type RecordedN2ProofResult,
   type RecordedStableN1ProofResult,
   type RecordedBaseProofHandle,
 };
@@ -97,6 +100,12 @@ type RecordedN1ProofResult = RecordedProofResult & {
 
 type RecordedStableN1ProofResult = RecordedN1ProofResult & {
   stableCycles: number;
+};
+
+type RecordedN2ProofResult = RecordedProofResult & {
+  challengePolynomialCommitments: [string, string][];
+  oldBulletproofChallenges: string[][];
+  dlogPlonkIndex: [string, string][];
 };
 
 /**
@@ -363,6 +372,12 @@ type NativePickles = {
     witness: string[],
     additionalStableCycles: number
   ) => string;
+  rust_pickles_prove_recorded_n2?: (
+    circuit: string,
+    firstWitness: string[],
+    secondWitness: string[],
+    appState: string[]
+  ) => string;
   rust_pickles_prove_recorded_n1_over?: (
     handle: unknown,
     circuit: string,
@@ -500,6 +515,40 @@ async function proveRecordedN(
   return proveRecordedStableN1(f, recursiveCycles - 2);
 }
 
+/**
+ * Records the same circuit twice with two witnesses and proves a true
+ * width-2 (`N2`) recursive Pickles step over both base proofs. `appState` is
+ * the public state bound by the N2 digest; this low-level API does not derive
+ * an aggregation relation from the two previous app states.
+ */
+async function proveRecordedN2(
+  first: () => Field[] | Promise<Field[]>,
+  second: () => Field[] | Promise<Field[]>,
+  appState: Field[] | string[]
+): Promise<RecordedN2ProofResult> {
+  let native = await nativePickles();
+  if (!native.rust_pickles_prove_recorded_n2) {
+    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n2 — rebuild it.');
+  }
+  let firstRecorded = await recordCircuit(first);
+  let secondRecorded = await recordCircuit(second);
+  let circuitJson = JSON.stringify(firstRecorded.circuit);
+  if (JSON.stringify(secondRecorded.circuit) !== circuitJson) {
+    throw Error('proveRecordedN2 expects both executions to record the same circuit shape');
+  }
+  let appStateDecimal = appState.map((field) =>
+    typeof field === 'string' ? field : field.toString()
+  );
+  return JSON.parse(
+    native.rust_pickles_prove_recorded_n2(
+      circuitJson,
+      firstRecorded.witness,
+      secondRecorded.witness,
+      appStateDecimal
+    )
+  );
+}
+
 /** Verifies a base-case recorded proof standalone against its embedded side-loaded key. */
 async function verifyRecordedBaseCase(result: RecordedProofResult): Promise<boolean> {
   let native = await nativePickles();
@@ -510,6 +559,23 @@ async function verifyRecordedBaseCase(result: RecordedProofResult): Promise<bool
     result.appState,
     [],
     [],
+    JSON.stringify(result.proof)
+  );
+}
+
+/** Verifies an N2 recorded proof standalone, binding both recursion messages. */
+async function verifyRecordedN2(result: RecordedN2ProofResult): Promise<boolean> {
+  let native = await nativePickles();
+  if (!native.rust_pickles_verify_side_loaded_with_step_vk) {
+    throw Error(
+      '@o1js/native does not expose rust_pickles_verify_side_loaded_with_step_vk — rebuild it.'
+    );
+  }
+  return native.rust_pickles_verify_side_loaded_with_step_vk(
+    result.appState,
+    result.dlogPlonkIndex,
+    result.challengePolynomialCommitments,
+    result.oldBulletproofChallenges,
     JSON.stringify(result.proof)
   );
 }
