@@ -23,12 +23,15 @@ import { snarkContext } from '../provable/core/provable-context.js';
 export {
   recordCircuit,
   proveRecordedBaseCase,
+  proveRecordedBaseCaseKeep,
   proveRecordedN1,
+  proveRecordedN1Over,
   verifyRecordedBaseCase,
   verifyRecordedN1,
   type RecordedCircuitJson,
   type RecordedProofResult,
   type RecordedN1ProofResult,
+  type RecordedBaseProofHandle,
 };
 
 type RecordedLinCombJson = { constant?: string; terms?: [string, number][] };
@@ -87,6 +90,17 @@ type RecordedN1ProofResult = RecordedProofResult & {
   challengePolynomialCommitment: [string, string];
   oldBulletproofChallenges: string[];
   dlogPlonkIndex: [string, string][];
+};
+
+/**
+ * A base-case proof kept alive in native memory for chaining: the full proof
+ * (not just the envelope) stays on the Rust side behind the opaque `handle`,
+ * so a later {@link proveRecordedN1Over} call can recursively verify it. The
+ * envelope fields mirror {@link RecordedProofResult} and verify with
+ * {@link verifyRecordedBaseCase}.
+ */
+type RecordedBaseProofHandle = RecordedProofResult & {
+  handle: unknown;
 };
 
 /** The gates the recorder does not capture yet — calling one during recording is an error. */
@@ -334,7 +348,14 @@ async function recordCircuit(
 
 type NativePickles = {
   rust_pickles_prove_recorded_base?: (circuit: string, witness: string[]) => string;
+  rust_pickles_prove_recorded_base_keep?: (circuit: string, witness: string[]) => unknown;
+  rust_pickles_recorded_base_envelope?: (handle: unknown) => string;
   rust_pickles_prove_recorded_n1?: (circuit: string, witness: string[]) => string;
+  rust_pickles_prove_recorded_n1_over?: (
+    handle: unknown,
+    circuit: string,
+    witness: string[]
+  ) => string;
   rust_pickles_verify_side_loaded?: (
     appState: string[],
     commitments: string[][],
@@ -371,6 +392,44 @@ async function proveRecordedBaseCase(
   }
   let { circuit, witness } = await recordCircuit(f);
   return JSON.parse(native.rust_pickles_prove_recorded_base(JSON.stringify(circuit), witness));
+}
+
+/**
+ * Records `f` and proves it through the Rust base-case pipeline, keeping the
+ * full proof alive in native memory so {@link proveRecordedN1Over} can later
+ * recursively verify it (the ZkProgram `SelfProof` shape).
+ */
+async function proveRecordedBaseCaseKeep(
+  f: () => Field[] | Promise<Field[]>
+): Promise<RecordedBaseProofHandle> {
+  let native = await nativePickles();
+  if (!native.rust_pickles_prove_recorded_base_keep || !native.rust_pickles_recorded_base_envelope) {
+    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_base_keep — rebuild it.');
+  }
+  let { circuit, witness } = await recordCircuit(f);
+  let handle = native.rust_pickles_prove_recorded_base_keep(JSON.stringify(circuit), witness);
+  let envelope = JSON.parse(native.rust_pickles_recorded_base_envelope(handle));
+  return { handle, ...envelope };
+}
+
+/**
+ * Records `f` as a *new* circuit and proves one recursive (N1) Pickles cycle
+ * whose step runs it while verifying the kept base proof. The resulting
+ * digest binds the new circuit's `appState` together with the verified
+ * proof's accumulator — verify with {@link verifyRecordedN1}.
+ */
+async function proveRecordedN1Over(
+  previous: RecordedBaseProofHandle,
+  f: () => Field[] | Promise<Field[]>
+): Promise<RecordedN1ProofResult> {
+  let native = await nativePickles();
+  if (!native.rust_pickles_prove_recorded_n1_over) {
+    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1_over — rebuild it.');
+  }
+  let { circuit, witness } = await recordCircuit(f);
+  return JSON.parse(
+    native.rust_pickles_prove_recorded_n1_over(previous.handle, JSON.stringify(circuit), witness)
+  );
 }
 
 /** Records `f` and proves it plus one recursive (N1) Pickles cycle. */

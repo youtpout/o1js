@@ -43,9 +43,12 @@ import { VerificationKey } from './verification-key.js';
 import { DeclaredProof, ZkProgramContext } from './zkprogram-context.js';
 import {
   proveRecordedBaseCase,
+  proveRecordedBaseCaseKeep,
   proveRecordedN1,
+  proveRecordedN1Over,
   verifyRecordedBaseCase,
   verifyRecordedN1,
+  type RecordedBaseProofHandle,
   type RecordedN1ProofResult,
   type RecordedProofResult,
 } from './rust-pickles-recorded.js';
@@ -316,7 +319,25 @@ function ZkProgram<
       methodName: K,
       ...args: Parameters<InferMethodType<Config>[K]['method']>
     ): Promise<RecordedProofResult>;
+    /**
+     * Like `proveBaseCase`, but keeps the full proof alive in native memory
+     * so `proveN1Over` can recursively verify it.
+     */
+    proveBaseCaseKeep<K extends keyof Config['methods']>(
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ): Promise<RecordedBaseProofHandle>;
     proveN1<K extends keyof Config['methods']>(
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ): Promise<RecordedN1ProofResult>;
+    /**
+     * Proves one recursive cycle whose step runs `methodName` while
+     * verifying a previously kept proof — the `SelfProof` shape: the proof
+     * of call `k` is consumed by call `k + 1`.
+     */
+    proveN1Over<K extends keyof Config['methods']>(
+      previous: RecordedBaseProofHandle,
       methodName: K,
       ...args: Parameters<InferMethodType<Config>[K]['method']>
     ): Promise<RecordedN1ProofResult>;
@@ -589,11 +610,26 @@ function ZkProgram<
     ) {
       return proveRecordedBaseCase(() => rustPicklesOutputFieldsForMethod(methodName, args));
     },
+    async proveBaseCaseKeep<K extends MethodKey>(
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ) {
+      return proveRecordedBaseCaseKeep(() => rustPicklesOutputFieldsForMethod(methodName, args));
+    },
     async proveN1<K extends MethodKey>(
       methodName: K,
       ...args: Parameters<InferMethodType<Config>[K]['method']>
     ) {
       return proveRecordedN1(() => rustPicklesOutputFieldsForMethod(methodName, args));
+    },
+    async proveN1Over<K extends MethodKey>(
+      previous: RecordedBaseProofHandle,
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ) {
+      return proveRecordedN1Over(previous, () =>
+        rustPicklesOutputFieldsForMethod(methodName, args)
+      );
     },
     verifyBaseCase: verifyRecordedBaseCase,
     verifyN1: verifyRecordedN1,

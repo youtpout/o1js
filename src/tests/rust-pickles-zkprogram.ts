@@ -12,7 +12,7 @@ const Program = ZkProgram({
   methods: {
     compute: {
       privateInputs: [],
-      method() {
+      async method() {
         let x = Provable.witness(Field, () => Field(3));
         let x2 = x.mul(x);
         x2.assertEquals(x.square());
