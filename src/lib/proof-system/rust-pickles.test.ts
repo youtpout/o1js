@@ -4,7 +4,7 @@ import {
   rustPicklesProofToJSON,
   rustPicklesProofToJSONString,
   type RustPicklesJsonProof,
-} from './rust-pickles';
+} from './rust-pickles.js';
 
 const jsonProof: RustPicklesJsonProof = {
   version: 1,
