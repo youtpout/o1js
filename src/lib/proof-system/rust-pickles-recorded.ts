@@ -11,8 +11,8 @@
  *
  * Supported constraints so far: the basic snarky constraints (equal, square,
  * r1cs, boolean), generic gates and Poseidon permutations.
- * Other gates (EC, range checks, lookups) throw during recording until their
- * recorder is wired up.
+ * EC addition, range checks and lookups. Other gates throw during recording
+ * until their recorder is wired up.
  */
 import { Snarky, initializeBindings } from '../../bindings.js';
 import type { Field } from '../provable/field.js';
@@ -53,6 +53,23 @@ type RecordedConstraintJson =
       kind: 'poseidon';
       states: RecordedLinCombJson[][];
       last: RecordedLinCombJson[];
+    }
+  | {
+      kind: 'ec_add_complete';
+      p1: [RecordedLinCombJson, RecordedLinCombJson];
+      p2: [RecordedLinCombJson, RecordedLinCombJson];
+      p3: [RecordedLinCombJson, RecordedLinCombJson];
+      inf: RecordedLinCombJson;
+      same_x: RecordedLinCombJson;
+      slope: RecordedLinCombJson;
+      inf_z: RecordedLinCombJson;
+      x21_inv: RecordedLinCombJson;
+    }
+  | { kind: 'range_check0'; row: RecordedLinCombJson[]; compact: string }
+  | { kind: 'range_check1'; row: RecordedLinCombJson[]; next: RecordedLinCombJson[] }
+  | {
+      kind: 'lookup';
+      row: RecordedLinCombJson[];
     };
 
 type RecordedCircuitJson = {
@@ -74,15 +91,11 @@ type RecordedN1ProofResult = RecordedProofResult & {
 
 /** The gates the recorder does not capture yet — calling one during recording is an error. */
 const unsupportedGates = [
-  'ecAdd',
   'ecScale',
   'ecEndoscale',
   'ecEndoscalar',
-  'rangeCheck0',
-  'rangeCheck1',
   'xor',
   'rotate',
-  'lookup',
   'foreignFieldAdd',
   'foreignFieldMul',
   'raw',
@@ -94,6 +107,27 @@ function mlArrayToArray<T>(array: { length: number; [index: number]: T }): T[] {
 
 function mlTupleToArray<T>(tuple: { length: number; [index: number]: T }): T[] {
   return Array.prototype.slice.call(tuple, 1);
+}
+
+function fieldVarsFromMlArray(name: string, values: unknown, length?: number): FieldVar[] {
+  let array = mlArrayToArray<FieldVar>(values as { length: number; [index: number]: FieldVar });
+  if (length !== undefined) assertLength(name, array, length);
+  return array;
+}
+
+function fieldVarsFromMlTuple(name: string, values: unknown, length: number): FieldVar[] {
+  return assertLength(
+    name,
+    mlTupleToArray<FieldVar>(values as { length: number; [index: number]: FieldVar }),
+    length
+  );
+}
+
+function assertLength<T>(name: string, values: T[], length: number): T[] {
+  if (values.length !== length) {
+    throw Error(`Rust Pickles recorder: ${name} expected ${length} values, got ${values.length}`);
+  }
+  return values;
 }
 
 class CircuitRecorder {
@@ -161,6 +195,10 @@ async function recordCircuit(
     assertBoolean: field.assertBoolean,
     generic: gates.generic,
     poseidon: gates.poseidon,
+    ecAdd: gates.ecAdd,
+    rangeCheck0: gates.rangeCheck0,
+    rangeCheck1: gates.rangeCheck1,
+    lookup: gates.lookup,
   };
   let originalGates = new Map<string, unknown>();
 
@@ -200,8 +238,8 @@ async function recordCircuit(
     return original.generic.call(gates, cl, l, cr, r, co, o, m, c);
   };
   gates.poseidon = (state) => {
-    let states = mlArrayToArray(state).map((row) =>
-      mlTupleToArray(row).map((cell) => recorder.lc(cell))
+    let states = mlArrayToArray<unknown>(state as { length: number; [index: number]: unknown }).map(
+      (row) => fieldVarsFromMlTuple('poseidon.state', row, 3).map((cell) => recorder.lc(cell))
     );
     if (states.length === 0) throw Error('Rust Pickles recorder: empty Poseidon state');
     let last = states[states.length - 1];
@@ -211,6 +249,51 @@ async function recordCircuit(
       last,
     });
     return original.poseidon.call(gates, state);
+  };
+  gates.ecAdd = (p1, p2, p3, inf, same_x, slope, inf_z, x21_inv) => {
+    let [p1x, p1y] = fieldVarsFromMlTuple('ecAdd.p1', p1, 2);
+    let [p2x, p2y] = fieldVarsFromMlTuple('ecAdd.p2', p2, 2);
+    let [p3x, p3y] = fieldVarsFromMlTuple('ecAdd.p3', p3, 2);
+    recorder.constraints.push({
+      kind: 'ec_add_complete',
+      p1: [recorder.lc(p1x), recorder.lc(p1y)],
+      p2: [recorder.lc(p2x), recorder.lc(p2y)],
+      p3: [recorder.lc(p3x), recorder.lc(p3y)],
+      inf: recorder.lc(inf),
+      same_x: recorder.lc(same_x),
+      slope: recorder.lc(slope),
+      inf_z: recorder.lc(inf_z),
+      x21_inv: recorder.lc(x21_inv),
+    });
+    return original.ecAdd.call(gates, p1, p2, p3, inf, same_x, slope, inf_z, x21_inv);
+  };
+  gates.rangeCheck0 = (v0, v0p, v0c, compact) => {
+    let row = [
+      v0,
+      ...fieldVarsFromMlTuple('rangeCheck0.v0p', v0p, 6),
+      ...fieldVarsFromMlTuple('rangeCheck0.v0c', v0c, 8),
+    ];
+    recorder.constraints.push({
+      kind: 'range_check0',
+      row: row.map((cell) => recorder.lc(cell)),
+      compact: FieldConst.toBigint(compact).toString(),
+    });
+    return original.rangeCheck0.call(gates, v0, v0p, v0c, compact);
+  };
+  gates.rangeCheck1 = (v2, v12, vCurr, vNext) => {
+    let row = [v2, v12, ...fieldVarsFromMlTuple('rangeCheck1.vCurr', vCurr, 13)];
+    let next = fieldVarsFromMlTuple('rangeCheck1.vNext', vNext, 15);
+    recorder.constraints.push({
+      kind: 'range_check1',
+      row: row.map((cell) => recorder.lc(cell)),
+      next: next.map((cell) => recorder.lc(cell)),
+    });
+    return original.rangeCheck1.call(gates, v2, v12, vCurr, vNext);
+  };
+  gates.lookup = (input) => {
+    let row = fieldVarsFromMlTuple('lookup', input, 7);
+    recorder.constraints.push({ kind: 'lookup', row: row.map((cell) => recorder.lc(cell)) });
+    return original.lookup.call(gates, input);
   };
   for (let name of unsupportedGates) {
     let gate = (gates as Record<string, unknown>)[name];
@@ -239,6 +322,10 @@ async function recordCircuit(
     field.assertBoolean = original.assertBoolean;
     gates.generic = original.generic;
     gates.poseidon = original.poseidon;
+    gates.ecAdd = original.ecAdd;
+    gates.rangeCheck0 = original.rangeCheck0;
+    gates.rangeCheck1 = original.rangeCheck1;
+    gates.lookup = original.lookup;
     for (let [name, gate] of originalGates) {
       (gates as Record<string, unknown>)[name] = gate;
     }
