@@ -71,8 +71,8 @@ let n2 = await Program.experimentalRustPickles.proveN2(
   'squareArg',
   [Field(10)],
   'squareArg',
-  [Field(10)],
-  [Field(200)]
+  [Field(11)],
+  [Field(221)]
 );
 console.log(`true N2 proof in ${Date.now() - t0}ms, appState =`, n2.appState);
 if (!(await Program.experimentalRustPickles.verifyN2(n2))) {

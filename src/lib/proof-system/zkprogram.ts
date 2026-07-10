@@ -608,12 +608,20 @@ function ZkProgram<
     } else {
       privateInputValues = inputArgs;
     }
-    let args = zip(privateInputValues, privateInputTypes[methodIndex]).map(([arg, type]) =>
-      ProvableType.get(type).fromValue(arg)
-    );
-
     let id = ZkProgramContext.enter();
     try {
+      let args = zip(privateInputValues, privateInputTypes[methodIndex]).map(([arg, type], i) => {
+        try {
+          let value = Provable.witness(type, () => arg);
+          extractProofs(value).forEach((proof) => proof.declare());
+          return value;
+        } catch (e: any) {
+          e.message = `Error when witnessing Rust Pickles recorded argument ${i} in ${String(
+            key
+          )}: ${e.message}`;
+          throw e;
+        }
+      });
       let result =
         (hasPublicInput
           ? await (methods[key].method as any)(publicInput, ...args)
