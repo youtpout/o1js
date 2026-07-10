@@ -28,6 +28,14 @@ const Program = ZkProgram({
         return { publicOutput: out };
       },
     },
+    squareArg: {
+      privateInputs: [Field],
+      async method(x: Field) {
+        let out = x.mul(x);
+        out.assertEquals(x.square());
+        return { publicOutput: out };
+      },
+    },
   },
 });
 
@@ -55,5 +63,19 @@ if (!(await Program.experimentalRustPickles.verifyN1(chained))) {
 let tampered = { ...chained, appState: ['42'] };
 if (await Program.experimentalRustPickles.verifyN1(tampered)) {
   throw Error('tampered app state was accepted');
+}
+
+console.log('proving true N2 from two squareArg base proofs...');
+t0 = Date.now();
+let n2 = await Program.experimentalRustPickles.proveN2(
+  'squareArg',
+  [Field(10)],
+  'squareArg',
+  [Field(10)],
+  [Field(200)]
+);
+console.log(`true N2 proof in ${Date.now() - t0}ms, appState =`, n2.appState);
+if (!(await Program.experimentalRustPickles.verifyN2(n2))) {
+  throw Error('true N2 proof verification failed');
 }
 console.log('OK');

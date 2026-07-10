@@ -46,10 +46,13 @@ import {
   proveRecordedBaseCaseKeep,
   proveRecordedN1,
   proveRecordedN1Over,
+  proveRecordedN2,
   verifyRecordedBaseCase,
   verifyRecordedN1,
+  verifyRecordedN2,
   type RecordedBaseProofHandle,
   type RecordedN1ProofResult,
+  type RecordedN2ProofResult,
   type RecordedProofResult,
 } from './rust-pickles-recorded.js';
 
@@ -341,8 +344,21 @@ function ZkProgram<
       methodName: K,
       ...args: Parameters<InferMethodType<Config>[K]['method']>
     ): Promise<RecordedN1ProofResult>;
+    /**
+     * Proves a true width-2 recursive step over two base proofs recorded from
+     * the same circuit shape. `appState` is the public state bound by the N2
+     * digest; callers are responsible for choosing the aggregation relation.
+     */
+    proveN2<K1 extends keyof Config['methods'], K2 extends keyof Config['methods']>(
+      firstMethodName: K1,
+      firstArgs: Parameters<InferMethodType<Config>[K1]['method']>,
+      secondMethodName: K2,
+      secondArgs: Parameters<InferMethodType<Config>[K2]['method']>,
+      appState: Field[] | string[]
+    ): Promise<RecordedN2ProofResult>;
     verifyBaseCase(result: RecordedProofResult): Promise<boolean>;
     verifyN1(result: RecordedN1ProofResult): Promise<boolean>;
+    verifyN2(result: RecordedN2ProofResult): Promise<boolean>;
   };
 } & {
     [I in keyof Config['methods']]: Prover<
@@ -631,8 +647,22 @@ function ZkProgram<
         rustPicklesOutputFieldsForMethod(methodName, args)
       );
     },
+    async proveN2<K1 extends MethodKey, K2 extends MethodKey>(
+      firstMethodName: K1,
+      firstArgs: Parameters<InferMethodType<Config>[K1]['method']>,
+      secondMethodName: K2,
+      secondArgs: Parameters<InferMethodType<Config>[K2]['method']>,
+      appState: Field[] | string[]
+    ) {
+      return proveRecordedN2(
+        () => rustPicklesOutputFieldsForMethod(firstMethodName, firstArgs),
+        () => rustPicklesOutputFieldsForMethod(secondMethodName, secondArgs),
+        appState
+      );
+    },
     verifyBaseCase: verifyRecordedBaseCase,
     verifyN1: verifyRecordedN1,
+    verifyN2: verifyRecordedN2,
   };
 
   // wrap "regular" provers to remove an `undefined` public input argument,
