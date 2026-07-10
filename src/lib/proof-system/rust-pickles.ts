@@ -5,6 +5,7 @@
  * `JsonProof.proof` is the OCaml Pickles base64 representation, while this
  * envelope carries Rust's Mina `Wrap_wire_proof.Stable.V1` bin_prot bytes.
  */
+
 type RustPicklesJsonProof = {
   version: 1;
   statement: string[];
@@ -57,6 +58,19 @@ function rustPicklesProofToJSONString(proof: RustPicklesProof): string {
   return JSON.stringify(rustPicklesProofToJSON(proof));
 }
 
+async function rustPicklesProveSquareBaseCase(witness: bigint | number | string) {
+  let { initializeBindings, wasm } = await import('../../bindings.js');
+  await initializeBindings();
+  let prove = (wasm as unknown as { rust_pickles_square_base_proof_json?: (witness: string) => string })
+    .rust_pickles_square_base_proof_json;
+  if (typeof prove !== 'function') {
+    throw Error(
+      'Rust Pickles native backend is not available. Call setBackend("native") before initializeBindings() and build @o1js/native from proof-systems.'
+    );
+  }
+  return rustPicklesProofFromJSONString(prove(witness.toString()));
+}
+
 function assertRustPicklesJsonProof(value: unknown): asserts value is RustPicklesJsonProof {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw Error('Invalid Rust Pickles proof JSON: expected object');
@@ -93,6 +107,7 @@ export {
   assertRustPicklesJsonProof,
   rustPicklesProofFromJSON,
   rustPicklesProofFromJSONString,
+  rustPicklesProveSquareBaseCase,
   rustPicklesProofToJSON,
   rustPicklesProofToJSONString,
 };
