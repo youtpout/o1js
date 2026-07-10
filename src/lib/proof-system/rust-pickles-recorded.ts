@@ -10,9 +10,9 @@
  * host-language callback re-enters Rust during proving.
  *
  * Supported constraints so far: the basic snarky constraints (equal, square,
- * r1cs, boolean) and the generic gate — i.e. all `Field`/`Bool` arithmetic.
- * Other gates (Poseidon, EC, range checks, lookups) throw during recording
- * until their recorder is wired up.
+ * r1cs, boolean), generic gates and Poseidon permutations.
+ * Other gates (EC, range checks, lookups) throw during recording until their
+ * recorder is wired up.
  */
 import { Snarky, initializeBindings } from '../../bindings.js';
 import type { Field } from '../provable/field.js';
@@ -48,6 +48,11 @@ type RecordedConstraintJson =
       o: RecordedLinCombJson;
       m: string;
       c: string;
+    }
+  | {
+      kind: 'poseidon';
+      states: RecordedLinCombJson[][];
+      last: RecordedLinCombJson[];
     };
 
 type RecordedCircuitJson = {
@@ -69,7 +74,6 @@ type RecordedN1ProofResult = RecordedProofResult & {
 
 /** The gates the recorder does not capture yet — calling one during recording is an error. */
 const unsupportedGates = [
-  'poseidon',
   'ecAdd',
   'ecScale',
   'ecEndoscale',
@@ -83,6 +87,14 @@ const unsupportedGates = [
   'foreignFieldMul',
   'raw',
 ] as const;
+
+function mlArrayToArray<T>(array: { length: number; [index: number]: T }): T[] {
+  return Array.prototype.slice.call(array, 1);
+}
+
+function mlTupleToArray<T>(tuple: { length: number; [index: number]: T }): T[] {
+  return Array.prototype.slice.call(tuple, 1);
+}
 
 class CircuitRecorder {
   /** jsoo variable index -> dense recorded index */
@@ -148,6 +160,7 @@ async function recordCircuit(
     assertSquare: field.assertSquare,
     assertBoolean: field.assertBoolean,
     generic: gates.generic,
+    poseidon: gates.poseidon,
   };
   let originalGates = new Map<string, unknown>();
 
@@ -186,6 +199,19 @@ async function recordCircuit(
     });
     return original.generic.call(gates, cl, l, cr, r, co, o, m, c);
   };
+  gates.poseidon = (state) => {
+    let states = mlArrayToArray(state).map((row) =>
+      mlTupleToArray(row).map((cell) => recorder.lc(cell))
+    );
+    if (states.length === 0) throw Error('Rust Pickles recorder: empty Poseidon state');
+    let last = states[states.length - 1];
+    recorder.constraints.push({
+      kind: 'poseidon',
+      states: states.slice(0, -1),
+      last,
+    });
+    return original.poseidon.call(gates, state);
+  };
   for (let name of unsupportedGates) {
     let gate = (gates as Record<string, unknown>)[name];
     if (typeof gate !== 'function') continue;
@@ -212,6 +238,7 @@ async function recordCircuit(
     field.assertSquare = original.assertSquare;
     field.assertBoolean = original.assertBoolean;
     gates.generic = original.generic;
+    gates.poseidon = original.poseidon;
     for (let [name, gate] of originalGates) {
       (gates as Record<string, unknown>)[name] = gate;
     }
