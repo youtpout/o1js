@@ -8,6 +8,10 @@
  * Run: ./run src/tests/rust-pickles-vk-parity.ts
  */
 import { Field, Provable, ZkProgram } from '../index.js';
+import {
+  rustPicklesProofFromJSON,
+  rustPicklesProofToJSON,
+} from '../lib/proof-system/rust-pickles.js';
 
 const Program = ZkProgram({
   name: 'RustPicklesVkParity',
@@ -28,6 +32,8 @@ const Program = ZkProgram({
 type DecodedVk = {
   maxProofsVerified: number;
   actualWrapDomainSize: number;
+  base64: string;
+  base58: string;
   commitments: [string, string][];
 };
 
@@ -42,14 +48,67 @@ let t0 = Date.now();
 let { verificationKey } = await Program.compile();
 console.log(`jsoo compile in ${Date.now() - t0}ms`);
 let jsooVk: DecodedVk = JSON.parse(decode(verificationKey.data, 'base64'));
+let jsooVkFromCanonicalBase58: DecodedVk = JSON.parse(decode(jsooVk.base58, 'base58'));
 
 console.log('proving via Rust Pickles (extracting its side-loaded VK)...');
 t0 = Date.now();
 let rustProof = await Program.experimentalRustPickles.proveBaseCase('compute');
 console.log(`rust prove in ${Date.now() - t0}ms`);
-let rustVkBase58 = (rustProof.proof as { side_loaded_verification_key_base58: string })
-  .side_loaded_verification_key_base58;
+let rustProofJson = rustProof.proof as {
+  version: 1;
+  statement: string[];
+  wrap_wire_proof_base64: string;
+  side_loaded_verification_key_base58: string;
+};
+let parsedRustProof = rustPicklesProofFromJSON(rustProofJson);
+let roundTrippedRustProof = rustPicklesProofToJSON(parsedRustProof);
+if (
+  roundTrippedRustProof.version !== rustProofJson.version ||
+  roundTrippedRustProof.wrap_wire_proof_base64 !== rustProofJson.wrap_wire_proof_base64 ||
+  roundTrippedRustProof.side_loaded_verification_key_base58 !==
+    rustProofJson.side_loaded_verification_key_base58 ||
+  JSON.stringify(roundTrippedRustProof.statement) !== JSON.stringify(rustProofJson.statement)
+) {
+  throw Error('Rust proof JSON failed o1js parser roundtrip');
+}
+if (!(await Program.experimentalRustPickles.verifyBaseCase(rustProof))) {
+  throw Error('Rust base proof failed standalone verification');
+}
+let tampered = { ...rustProof, appState: ['123'] };
+if (await Program.experimentalRustPickles.verifyBaseCase(tampered)) {
+  throw Error('Rust base proof verification accepted a tampered appState');
+}
+let rustVkBase58 = rustProofJson.side_loaded_verification_key_base58;
 let rustVk: DecodedVk = JSON.parse(decode(rustVkBase58, 'base58'));
+let rustVkFromCanonicalBase64: DecodedVk = JSON.parse(decode(rustVk.base64, 'base64'));
+
+function assertEqual(label: string, a: unknown, b: unknown) {
+  if (JSON.stringify(a) !== JSON.stringify(b)) {
+    throw Error(`${label} mismatch: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`);
+  }
+}
+
+assertEqual('jsoo VK base64/base58 metadata roundtrip', {
+  maxProofsVerified: jsooVk.maxProofsVerified,
+  actualWrapDomainSize: jsooVk.actualWrapDomainSize,
+  commitments: jsooVk.commitments,
+}, {
+  maxProofsVerified: jsooVkFromCanonicalBase58.maxProofsVerified,
+  actualWrapDomainSize: jsooVkFromCanonicalBase58.actualWrapDomainSize,
+  commitments: jsooVkFromCanonicalBase58.commitments,
+});
+assertEqual('rust VK base58/base64 metadata roundtrip', {
+  maxProofsVerified: rustVk.maxProofsVerified,
+  actualWrapDomainSize: rustVk.actualWrapDomainSize,
+  commitments: rustVk.commitments,
+}, {
+  maxProofsVerified: rustVkFromCanonicalBase64.maxProofsVerified,
+  actualWrapDomainSize: rustVkFromCanonicalBase64.actualWrapDomainSize,
+  commitments: rustVkFromCanonicalBase64.commitments,
+});
+assertEqual('maxProofsVerified', jsooVk.maxProofsVerified, rustVk.maxProofsVerified);
+assertEqual('actualWrapDomainSize', jsooVk.actualWrapDomainSize, rustVk.actualWrapDomainSize);
+assertEqual('commitments.length', jsooVk.commitments.length, rustVk.commitments.length);
 
 // -- report ------------------------------------------------------------
 
@@ -74,6 +133,8 @@ function compare(label: string, a: unknown, b: unknown) {
 compare('maxProofsVerified', jsooVk.maxProofsVerified, rustVk.maxProofsVerified);
 compare('actualWrapDomainSize', jsooVk.actualWrapDomainSize, rustVk.actualWrapDomainSize);
 compare('commitments.length', jsooVk.commitments.length, rustVk.commitments.length);
+compare('jsoo canonical base64 roundtrip', jsooVk.base64, jsooVkFromCanonicalBase58.base64);
+compare('rust canonical base58 roundtrip', rustVk.base58, rustVkFromCanonicalBase64.base58);
 
 let matching = 0;
 for (let i = 0; i < Math.min(jsooVk.commitments.length, rustVk.commitments.length); i++) {
@@ -91,4 +152,11 @@ if (matching !== jsooVk.commitments.length) {
   }
 }
 
-console.log(same ? '\nVK PARITY: FULL MATCH' : '\nVK PARITY: MISMATCH (expected while wrap_main layout differs)');
+if (same) {
+  console.log('\nVK PARITY: FULL MATCH');
+} else {
+  console.log('\nVK PARITY: COMMITMENT MISMATCH (metadata + codec invariants passed)');
+  if (process.env.RUST_PICKLES_STRICT_VK_PARITY === '1') {
+    throw Error('Strict VK parity requested and commitments differ');
+  }
+}
