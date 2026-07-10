@@ -42,6 +42,7 @@ import { decodeProverKey, encodeProverKey, parseHeader } from './prover-keys.js'
 import { VerificationKey } from './verification-key.js';
 import { DeclaredProof, ZkProgramContext } from './zkprogram-context.js';
 import {
+  compileRecorded,
   proveRecordedBaseCase,
   proveRecordedBaseCaseKeep,
   proveRecordedN1,
@@ -51,6 +52,7 @@ import {
   verifyRecordedN1,
   verifyRecordedN2,
   type RecordedBaseProofHandle,
+  type RecordedCompiledCircuit,
   type RecordedN1ProofResult,
   type RecordedN2ProofResult,
   type RecordedProofResult,
@@ -318,6 +320,10 @@ function ZkProgram<
    * feature coverage and verification-key parity are still incomplete.
    */
   experimentalRustPickles: {
+    compile<K extends keyof Config['methods']>(
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ): Promise<RecordedCompiledCircuit>;
     proveBaseCase<K extends keyof Config['methods']>(
       methodName: K,
       ...args: Parameters<InferMethodType<Config>[K]['method']>
@@ -620,6 +626,12 @@ function ZkProgram<
   }
 
   const experimentalRustPickles = {
+    async compile<K extends MethodKey>(
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ) {
+      return compileRecorded(() => rustPicklesOutputFieldsForMethod(methodName, args));
+    },
     async proveBaseCase<K extends MethodKey>(
       methodName: K,
       ...args: Parameters<InferMethodType<Config>[K]['method']>

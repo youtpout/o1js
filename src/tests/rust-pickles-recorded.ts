@@ -6,12 +6,8 @@
  */
 import { Field, Provable } from '../index.js';
 import {
-  proveRecordedBaseCase,
-  proveRecordedN,
-  proveRecordedN1,
+  compileRecorded,
   proveRecordedN2,
-  verifyRecordedBaseCase,
-  verifyRecordedN1,
   verifyRecordedN2,
 } from '../lib/proof-system/rust-pickles-recorded.js';
 
@@ -37,25 +33,26 @@ function squareCircuit(value: number) {
 
 console.log('recording + proving base case...');
 let t0 = Date.now();
-let base = await proveRecordedBaseCase(circuit);
+let compiled = await compileRecorded(circuit);
+let base = await compiled.proveBaseCase();
 console.log(`base proof in ${Date.now() - t0}ms, appState =`, base.appState);
 if (base.appState[0] !== '88') throw Error('wrong app state');
-console.log('standalone verify:', await verifyRecordedBaseCase(base));
-if (!(await verifyRecordedBaseCase(base))) throw Error('verification failed');
+console.log('standalone verify:', await compiled.verifyBaseCase(base));
+if (!(await compiled.verifyBaseCase(base))) throw Error('verification failed');
 
 console.log('recording + proving N1 cycle...');
 t0 = Date.now();
-let n1 = await proveRecordedN1(circuit);
+let n1 = await compiled.proveN1();
 console.log(`n1 proof in ${Date.now() - t0}ms, appState =`, n1.appState);
-console.log('standalone verify (n1):', await verifyRecordedN1(n1));
-if (!(await verifyRecordedN1(n1))) throw Error('n1 verification failed');
+console.log('standalone verify (n1):', await compiled.verifyN1(n1));
+if (!(await compiled.verifyN1(n1))) throw Error('n1 verification failed');
 
 console.log('recording + proving N2 stable cycle...');
 t0 = Date.now();
-let n2 = await proveRecordedN(circuit, 2);
+let n2 = await compiled.proveN(2);
 console.log(`n2 proof in ${Date.now() - t0}ms, appState =`, n2.appState);
-console.log('standalone verify (n2):', await verifyRecordedN1(n2));
-if (!(await verifyRecordedN1(n2))) throw Error('n2 verification failed');
+console.log('standalone verify (n2):', await compiled.verifyN1(n2));
+if (!(await compiled.verifyN1(n2))) throw Error('n2 verification failed');
 
 console.log('recording + proving true N2 width-2 cycle...');
 t0 = Date.now();

@@ -21,6 +21,7 @@ import { flattenFieldVar } from '../../native/snarky.js';
 import { snarkContext } from '../provable/core/provable-context.js';
 
 export {
+  compileRecorded,
   recordCircuit,
   proveRecordedBaseCase,
   proveRecordedBaseCaseKeep,
@@ -38,6 +39,7 @@ export {
   type RecordedN2ProofResult,
   type RecordedStableN1ProofResult,
   type RecordedBaseProofHandle,
+  type RecordedCompiledCircuit,
 };
 
 type RecordedLinCombJson = { constant?: string; terms?: [string, number][] };
@@ -117,6 +119,23 @@ type RecordedN2ProofResult = RecordedProofResult & {
  */
 type RecordedBaseProofHandle = RecordedProofResult & {
   handle: unknown;
+};
+
+type RecordedCompiledCircuit = {
+  circuit: RecordedCircuitJson;
+  witness: string[];
+  proveBaseCase(): Promise<RecordedProofResult>;
+  proveBaseCaseKeep(): Promise<RecordedBaseProofHandle>;
+  proveN1(): Promise<RecordedN1ProofResult>;
+  proveStableN1(additionalStableCycles?: number): Promise<RecordedStableN1ProofResult>;
+  proveN(recursiveCycles: number): Promise<RecordedN1ProofResult | RecordedStableN1ProofResult>;
+  proveN2With(
+    second: RecordedCompiledCircuit,
+    appState: Field[] | string[]
+  ): Promise<RecordedN2ProofResult>;
+  verifyBaseCase(result: RecordedProofResult): Promise<boolean>;
+  verifyN1(result: RecordedN1ProofResult): Promise<boolean>;
+  verifyN2(result: RecordedN2ProofResult): Promise<boolean>;
 };
 
 /** The gates the recorder does not capture yet — calling one during recording is an error. */
@@ -409,16 +428,133 @@ async function nativePickles(): Promise<NativePickles> {
   return native as NativePickles;
 }
 
-/** Records `f` and proves it through the Rust base-case Pickles pipeline. */
-async function proveRecordedBaseCase(
-  f: () => Field[] | Promise<Field[]>
+function circuitJsonOf(compiled: Pick<RecordedCompiledCircuit, 'circuit'>): string {
+  return JSON.stringify(compiled.circuit);
+}
+
+function appStateToDecimal(appState: Field[] | string[]): string[] {
+  return appState.map((field) => (typeof field === 'string' ? field : field.toString()));
+}
+
+async function proveRecordedBaseCaseCompiled(
+  compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'>
 ): Promise<RecordedProofResult> {
   let native = await nativePickles();
   if (!native.rust_pickles_prove_recorded_base) {
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_base — rebuild it.');
   }
-  let { circuit, witness } = await recordCircuit(f);
-  return JSON.parse(native.rust_pickles_prove_recorded_base(JSON.stringify(circuit), witness));
+  return JSON.parse(native.rust_pickles_prove_recorded_base(circuitJsonOf(compiled), compiled.witness));
+}
+
+async function proveRecordedBaseCaseKeepCompiled(
+  compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'>
+): Promise<RecordedBaseProofHandle> {
+  let native = await nativePickles();
+  if (!native.rust_pickles_prove_recorded_base_keep || !native.rust_pickles_recorded_base_envelope) {
+    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_base_keep — rebuild it.');
+  }
+  let handle = native.rust_pickles_prove_recorded_base_keep(circuitJsonOf(compiled), compiled.witness);
+  let envelope = JSON.parse(native.rust_pickles_recorded_base_envelope(handle));
+  return { handle, ...envelope };
+}
+
+async function proveRecordedN1Compiled(
+  compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'>
+): Promise<RecordedN1ProofResult> {
+  let native = await nativePickles();
+  if (!native.rust_pickles_prove_recorded_n1) {
+    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1 — rebuild it.');
+  }
+  return JSON.parse(native.rust_pickles_prove_recorded_n1(circuitJsonOf(compiled), compiled.witness));
+}
+
+async function proveRecordedStableN1Compiled(
+  compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'>,
+  additionalStableCycles = 0
+): Promise<RecordedStableN1ProofResult> {
+  if (!Number.isInteger(additionalStableCycles) || additionalStableCycles < 0) {
+    throw Error('additionalStableCycles must be a non-negative integer');
+  }
+  let native = await nativePickles();
+  if (!native.rust_pickles_prove_recorded_stable_n1) {
+    throw Error(
+      '@o1js/native does not expose rust_pickles_prove_recorded_stable_n1 — rebuild it.'
+    );
+  }
+  return JSON.parse(
+    native.rust_pickles_prove_recorded_stable_n1(
+      circuitJsonOf(compiled),
+      compiled.witness,
+      additionalStableCycles
+    )
+  );
+}
+
+async function proveRecordedNCompiled(
+  compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'>,
+  recursiveCycles: number
+): Promise<RecordedN1ProofResult | RecordedStableN1ProofResult> {
+  if (!Number.isInteger(recursiveCycles) || recursiveCycles < 1) {
+    throw Error('recursiveCycles must be a positive integer');
+  }
+  if (recursiveCycles === 1) return proveRecordedN1Compiled(compiled);
+  return proveRecordedStableN1Compiled(compiled, recursiveCycles - 2);
+}
+
+async function proveRecordedN2Compiled(
+  first: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'>,
+  second: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'>,
+  appState: Field[] | string[]
+): Promise<RecordedN2ProofResult> {
+  let native = await nativePickles();
+  if (!native.rust_pickles_prove_recorded_n2) {
+    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n2 — rebuild it.');
+  }
+  let circuitJson = circuitJsonOf(first);
+  if (circuitJsonOf(second) !== circuitJson) {
+    throw Error('proveRecordedN2 expects both executions to record the same circuit shape');
+  }
+  return JSON.parse(
+    native.rust_pickles_prove_recorded_n2(
+      circuitJson,
+      first.witness,
+      second.witness,
+      appStateToDecimal(appState)
+    )
+  );
+}
+
+/**
+ * Records a circuit once and returns a reusable compile/prove/verify facade.
+ * This avoids re-running the o1js recorder when trying base/N1/stable/N2
+ * proving variants for the same witness.
+ */
+async function compileRecorded(
+  f: () => Field[] | Promise<Field[]>
+): Promise<RecordedCompiledCircuit> {
+  let recorded = await recordCircuit(f);
+  let compiled: RecordedCompiledCircuit = {
+    ...recorded,
+    proveBaseCase: () => proveRecordedBaseCaseCompiled(compiled),
+    proveBaseCaseKeep: () => proveRecordedBaseCaseKeepCompiled(compiled),
+    proveN1: () => proveRecordedN1Compiled(compiled),
+    proveStableN1: (additionalStableCycles = 0) =>
+      proveRecordedStableN1Compiled(compiled, additionalStableCycles),
+    proveN: (recursiveCycles: number) => proveRecordedNCompiled(compiled, recursiveCycles),
+    proveN2With: (second: RecordedCompiledCircuit, appState: Field[] | string[]) =>
+      proveRecordedN2Compiled(compiled, second, appState),
+    verifyBaseCase: verifyRecordedBaseCase,
+    verifyN1: verifyRecordedN1,
+    verifyN2: verifyRecordedN2,
+  };
+  return compiled;
+}
+
+/** Records `f` and proves it through the Rust base-case Pickles pipeline. */
+async function proveRecordedBaseCase(
+  f: () => Field[] | Promise<Field[]>
+): Promise<RecordedProofResult> {
+  return proveRecordedBaseCaseCompiled(await recordCircuit(f));
 }
 
 /**
@@ -429,14 +565,7 @@ async function proveRecordedBaseCase(
 async function proveRecordedBaseCaseKeep(
   f: () => Field[] | Promise<Field[]>
 ): Promise<RecordedBaseProofHandle> {
-  let native = await nativePickles();
-  if (!native.rust_pickles_prove_recorded_base_keep || !native.rust_pickles_recorded_base_envelope) {
-    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_base_keep — rebuild it.');
-  }
-  let { circuit, witness } = await recordCircuit(f);
-  let handle = native.rust_pickles_prove_recorded_base_keep(JSON.stringify(circuit), witness);
-  let envelope = JSON.parse(native.rust_pickles_recorded_base_envelope(handle));
-  return { handle, ...envelope };
+  return proveRecordedBaseCaseKeepCompiled(await recordCircuit(f));
 }
 
 /**
@@ -463,12 +592,7 @@ async function proveRecordedN1Over(
 async function proveRecordedN1(
   f: () => Field[] | Promise<Field[]>
 ): Promise<RecordedN1ProofResult> {
-  let native = await nativePickles();
-  if (!native.rust_pickles_prove_recorded_n1) {
-    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1 — rebuild it.');
-  }
-  let { circuit, witness } = await recordCircuit(f);
-  return JSON.parse(native.rust_pickles_prove_recorded_n1(JSON.stringify(circuit), witness));
+  return proveRecordedN1Compiled(await recordCircuit(f));
 }
 
 /**
@@ -480,23 +604,7 @@ async function proveRecordedStableN1(
   f: () => Field[] | Promise<Field[]>,
   additionalStableCycles = 0
 ): Promise<RecordedStableN1ProofResult> {
-  if (!Number.isInteger(additionalStableCycles) || additionalStableCycles < 0) {
-    throw Error('additionalStableCycles must be a non-negative integer');
-  }
-  let native = await nativePickles();
-  if (!native.rust_pickles_prove_recorded_stable_n1) {
-    throw Error(
-      '@o1js/native does not expose rust_pickles_prove_recorded_stable_n1 — rebuild it.'
-    );
-  }
-  let { circuit, witness } = await recordCircuit(f);
-  return JSON.parse(
-    native.rust_pickles_prove_recorded_stable_n1(
-      JSON.stringify(circuit),
-      witness,
-      additionalStableCycles
-    )
-  );
+  return proveRecordedStableN1Compiled(await recordCircuit(f), additionalStableCycles);
 }
 
 /**
@@ -508,11 +616,7 @@ async function proveRecordedN(
   f: () => Field[] | Promise<Field[]>,
   recursiveCycles: number
 ): Promise<RecordedN1ProofResult | RecordedStableN1ProofResult> {
-  if (!Number.isInteger(recursiveCycles) || recursiveCycles < 1) {
-    throw Error('recursiveCycles must be a positive integer');
-  }
-  if (recursiveCycles === 1) return proveRecordedN1(f);
-  return proveRecordedStableN1(f, recursiveCycles - 2);
+  return proveRecordedNCompiled(await recordCircuit(f), recursiveCycles);
 }
 
 /**
@@ -526,27 +630,7 @@ async function proveRecordedN2(
   second: () => Field[] | Promise<Field[]>,
   appState: Field[] | string[]
 ): Promise<RecordedN2ProofResult> {
-  let native = await nativePickles();
-  if (!native.rust_pickles_prove_recorded_n2) {
-    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n2 — rebuild it.');
-  }
-  let firstRecorded = await recordCircuit(first);
-  let secondRecorded = await recordCircuit(second);
-  let circuitJson = JSON.stringify(firstRecorded.circuit);
-  if (JSON.stringify(secondRecorded.circuit) !== circuitJson) {
-    throw Error('proveRecordedN2 expects both executions to record the same circuit shape');
-  }
-  let appStateDecimal = appState.map((field) =>
-    typeof field === 'string' ? field : field.toString()
-  );
-  return JSON.parse(
-    native.rust_pickles_prove_recorded_n2(
-      circuitJson,
-      firstRecorded.witness,
-      secondRecorded.witness,
-      appStateDecimal
-    )
-  );
+  return proveRecordedN2Compiled(await recordCircuit(first), await recordCircuit(second), appState);
 }
 
 /** Verifies a base-case recorded proof standalone against its embedded side-loaded key. */

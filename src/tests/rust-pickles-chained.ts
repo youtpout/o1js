@@ -78,4 +78,9 @@ console.log(`true N2 proof in ${Date.now() - t0}ms, appState =`, n2.appState);
 if (!(await Program.experimentalRustPickles.verifyN2(n2))) {
   throw Error('true N2 proof verification failed');
 }
+
+let compiled = await Program.experimentalRustPickles.compile('square');
+if (compiled.witness.length === 0 || compiled.circuit.constraints.length === 0) {
+  throw Error('experimentalRustPickles.compile did not record the method');
+}
 console.log('OK');
