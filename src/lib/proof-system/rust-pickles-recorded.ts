@@ -181,7 +181,7 @@ class CircuitRecorder {
  * `Field`s forming the application state bound by the proof.
  */
 async function recordCircuit(
-  f: () => Field[]
+  f: () => Field[] | Promise<Field[]>
 ): Promise<{ circuit: RecordedCircuitJson; witness: string[] }> {
   await initializeBindings();
   let recorder = new CircuitRecorder();
@@ -310,7 +310,7 @@ async function recordCircuit(
   let id = snarkContext.enter({ inCheckedComputation: true });
   try {
     let finish = Snarky.run.enterGenerateWitness();
-    let outputs = f();
+    let outputs = await f();
     let output = outputs.map((x) => recorder.lc(x.value));
     finish();
     return { circuit: recorder.circuit(output), witness: recorder.witness };
@@ -362,7 +362,9 @@ async function nativePickles(): Promise<NativePickles> {
 }
 
 /** Records `f` and proves it through the Rust base-case Pickles pipeline. */
-async function proveRecordedBaseCase(f: () => Field[]): Promise<RecordedProofResult> {
+async function proveRecordedBaseCase(
+  f: () => Field[] | Promise<Field[]>
+): Promise<RecordedProofResult> {
   let native = await nativePickles();
   if (!native.rust_pickles_prove_recorded_base) {
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_base — rebuild it.');
@@ -372,7 +374,9 @@ async function proveRecordedBaseCase(f: () => Field[]): Promise<RecordedProofRes
 }
 
 /** Records `f` and proves it plus one recursive (N1) Pickles cycle. */
-async function proveRecordedN1(f: () => Field[]): Promise<RecordedN1ProofResult> {
+async function proveRecordedN1(
+  f: () => Field[] | Promise<Field[]>
+): Promise<RecordedN1ProofResult> {
   let native = await nativePickles();
   if (!native.rust_pickles_prove_recorded_n1) {
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1 — rebuild it.');

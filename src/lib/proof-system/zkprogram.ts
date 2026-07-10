@@ -41,6 +41,14 @@ import {
 import { decodeProverKey, encodeProverKey, parseHeader } from './prover-keys.js';
 import { VerificationKey } from './verification-key.js';
 import { DeclaredProof, ZkProgramContext } from './zkprogram-context.js';
+import {
+  proveRecordedBaseCase,
+  proveRecordedN1,
+  verifyRecordedBaseCase,
+  verifyRecordedN1,
+  type RecordedN1ProofResult,
+  type RecordedProofResult,
+} from './rust-pickles-recorded.js';
 
 // public API
 export { Empty, JsonProof, Method, SelfProof, Undefined, Void, ZkProgram, verify };
@@ -297,6 +305,24 @@ function ZkProgram<
 
   proofsEnabled: boolean;
   setProofsEnabled(proofsEnabled: boolean): void;
+  /**
+   * Experimental direct Rust Pickles path. This records the selected o1js
+   * method into a `RecordedCircuit` and proves/verifies through @o1js/native,
+   * bypassing OCaml Pickles. The public API is intentionally separate while
+   * feature coverage and verification-key parity are still incomplete.
+   */
+  experimentalRustPickles: {
+    proveBaseCase<K extends keyof Config['methods']>(
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ): Promise<RecordedProofResult>;
+    proveN1<K extends keyof Config['methods']>(
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ): Promise<RecordedN1ProofResult>;
+    verifyBaseCase(result: RecordedProofResult): Promise<boolean>;
+    verifyN1(result: RecordedN1ProofResult): Promise<boolean>;
+  };
 } & {
     [I in keyof Config['methods']]: Prover<
       InferProvableOrUndefined<Get<Config, 'publicInput'>>,
@@ -524,6 +550,55 @@ function ZkProgram<
   }
   let regularProvers = mapToObject(methodKeys, toRegularProver);
 
+  async function rustPicklesOutputFieldsForMethod<K extends MethodKey>(
+    key: K,
+    inputArgs: Parameters<InferMethodType<Config>[K]['method']>
+  ): Promise<Field[]> {
+    let methodIndex = methodKeys.indexOf(key);
+    if (methodIndex === -1) throw Error(`Unknown ZkProgram method '${String(key)}'`);
+
+    let publicInput: PublicInput | undefined = undefined;
+    let privateInputValues: unknown[];
+    if (hasPublicInput) {
+      publicInput = publicInputType.fromValue(inputArgs[0] as PublicInput);
+      privateInputValues = inputArgs.slice(1);
+    } else {
+      privateInputValues = inputArgs;
+    }
+    let args = zip(privateInputValues, privateInputTypes[methodIndex]).map(([arg, type]) =>
+      ProvableType.get(type).fromValue(arg)
+    );
+
+    let id = ZkProgramContext.enter();
+    try {
+      let result =
+        (hasPublicInput
+          ? await (methods[key].method as any)(publicInput, ...args)
+          : await (methods[key].method as any)(...args)) ?? {};
+      if (publicOutputType === Undefined || publicOutputType === Void) return [];
+      return publicOutputType.toFields(result.publicOutput);
+    } finally {
+      ZkProgramContext.leave(id);
+    }
+  }
+
+  const experimentalRustPickles = {
+    async proveBaseCase<K extends MethodKey>(
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ) {
+      return proveRecordedBaseCase(() => rustPicklesOutputFieldsForMethod(methodName, args));
+    },
+    async proveN1<K extends MethodKey>(
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ) {
+      return proveRecordedN1(() => rustPicklesOutputFieldsForMethod(methodName, args));
+    },
+    verifyBaseCase: verifyRecordedBaseCase,
+    verifyN1: verifyRecordedN1,
+  };
+
   // wrap "regular" provers to remove an `undefined` public input argument,
   // this matches how the method itself was defined in the case of no public input
   type Prover_<K extends MethodKey = MethodKey> = Prover<
@@ -587,6 +662,7 @@ function ZkProgram<
       rawMethods: Object.fromEntries(methodKeys.map((key) => [key, methods[key].method])) as any,
 
       Proof: SelfProof,
+      experimentalRustPickles,
 
       proofsEnabled: doProving,
       setProofsEnabled(proofsEnabled: boolean) {
