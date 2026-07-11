@@ -93,17 +93,50 @@ console.log('  histogram rust:', JSON.stringify(gateHistogram(rustCircuit.gates)
 
 let n = Math.min(jsooCircuit.gates.length, rustCircuit.gates.length);
 let diffs: number[] = [];
+let typeDiffs: number[] = [];
+let wiringDiffs: number[] = [];
+let coeffDiffs: number[] = [];
 for (let i = 0; i < n; i++) {
-  if (JSON.stringify(jsooCircuit.gates[i]) !== JSON.stringify(rustCircuit.gates[i])) diffs.push(i);
+  let j = jsooCircuit.gates[i];
+  let r = rustCircuit.gates[i];
+  if (JSON.stringify(j) !== JSON.stringify(r)) {
+    diffs.push(i);
+    if (j.typ !== r.typ) typeDiffs.push(i);
+    else if (JSON.stringify(j.coeffs) !== JSON.stringify(r.coeffs)) coeffDiffs.push(i);
+    else if (JSON.stringify(j.wires) !== JSON.stringify(r.wires)) wiringDiffs.push(i);
+  }
 }
 if (diffs.length === 0 && jsooCircuit.gates.length === rustCircuit.gates.length) {
   console.log('\nWRAP GATES: FULL MATCH');
 } else {
   console.log(`\n  divergent rows: ${diffs.length} (first: ${diffs[0]})`);
+  console.log(
+    `  by class: type=${typeDiffs.length} coeffs=${coeffDiffs.length} wiring=${wiringDiffs.length}`
+  );
+  printSegments('type', typeDiffs);
+  printSegments('coeffs', coeffDiffs);
+  printSegments('wiring', wiringDiffs);
   if (diffs.length > 0) {
     let i = diffs[0];
     console.log('  jsoo:', JSON.stringify(jsooCircuit.gates[i]).slice(0, 400));
     console.log('  rust:', JSON.stringify(rustCircuit.gates[i]).slice(0, 400));
   }
   console.log('\nfull dumps: /tmp/claude-1000/wrap-circuit-{jsoo,rust}.json');
+}
+
+function printSegments(label: string, rows: number[]) {
+  if (rows.length === 0) return;
+  let segments: string[] = [];
+  let start = rows[0], prev = rows[0];
+  for (let i = 1; i < rows.length; i++) {
+    let row = rows[i];
+    if (row === prev + 1) {
+      prev = row;
+      continue;
+    }
+    segments.push(start === prev ? `${start}` : `${start}-${prev}`);
+    start = prev = row;
+  }
+  segments.push(start === prev ? `${start}` : `${start}-${prev}`);
+  console.log(`  ${label} segments: ${segments.slice(0, 40).join(', ')}${segments.length > 40 ? ', ...' : ''}`);
 }
