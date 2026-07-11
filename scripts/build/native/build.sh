@@ -91,4 +91,13 @@ chmod 660 $BINDINGS_PATH/kimchi_napi.node
 cp $BUILT_PATH/index.d.ts $BINDINGS_PATH/index.d.ts
 chmod 660 $BINDINGS_PATH/index.d.ts
 
+INSTALLED_BINDINGS_PATH=./node_modules/@o1js/native-$TARGET_SLUG
+if [ -d "$INSTALLED_BINDINGS_PATH" ]; then
+  info "syncing installed native package..."
+  cp $BINDINGS_PATH/kimchi_napi.node $INSTALLED_BINDINGS_PATH/kimchi_napi.node
+  chmod 660 $INSTALLED_BINDINGS_PATH/kimchi_napi.node
+  cp $BINDINGS_PATH/index.d.ts $INSTALLED_BINDINGS_PATH/index.d.ts
+  chmod 660 $INSTALLED_BINDINGS_PATH/index.d.ts
+fi
+
 success "Native build success!"
