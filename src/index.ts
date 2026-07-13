@@ -2,7 +2,13 @@
  * Include in this file all the exports that should be part of the public API.
  */
 export { initializeBindings, Ledger } from './bindings.js';
-export { getBackendPreference, setBackend } from './lib/backend.js';
+export {
+  getBackendPreference,
+  getProofSystemBackend,
+  setBackend,
+  setProofSystemBackend,
+} from './lib/backend.js';
+export type { Backend, ProofSystemBackend } from './lib/backend.js';
 export { createForeignCurve, ForeignCurve, toPoint } from './lib/provable/crypto/foreign-curve.js';
 export type { FlexiblePoint } from './lib/provable/crypto/foreign-curve.js';
 export { createEcdsa, EcdsaSignature } from './lib/provable/crypto/foreign-ecdsa.js';

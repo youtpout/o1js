@@ -85,7 +85,7 @@ tags: [<free-form>, <tags>, <for-search>]
 
 | Category             | Use when...                                                |
 | -------------------- | ---------------------------------------------------------- |
-| `rust-wasm-boundary` | Issues crossing the Rust↔WASM↔TypeScript boundary        |
+| `rust-wasm-boundary` | Issues crossing the Rust↔WASM↔TypeScript boundary          |
 | `native-ffi`         | Neon/napi-rs native binding issues                         |
 | `circuit-model`      | Compile-time vs prove-time behavior, constraint generation |
 | `provable-types`     | Type system surprises, serialization, Struct issues        |
@@ -162,9 +162,9 @@ computation. When compiled to WASM, threading behaves fundamentally differently
 than in native environments.
 
 **What happened:** Panics inside Rayon worker threads in WASM environments
-produce cryptic, unrecoverable errors. The panic cannot be caught at the
-WASM↔JS boundary, and the entire WASM instance becomes corrupted. This has been
-hit multiple times across different debugging sessions.
+produce cryptic, unrecoverable errors. The panic cannot be caught at the WASM↔JS
+boundary, and the entire WASM instance becomes corrupted. This has been hit
+multiple times across different debugging sessions.
 
 **Root cause:** WASM's threading model (SharedArrayBuffer + Web Workers) doesn't
 support the panic unwinding that Rayon expects. When a Rayon worker panics, the
@@ -186,5 +186,45 @@ parallelized code MUST be tested in WASM, not just native. A passing native test
 does not guarantee WASM safety.
 
 **Relevant files:** `src/bindings/compiled/`, `src/bindings/native/`
+
+---
+
+date: 2026-07-13 agent: codex session: mina-runtime-regular-zkprogram category:
+architecture severity: high tags: [mina-runtime, napi, serde, zkprogram,
+proof-serialization]
+
+---
+
+### The mina-runtime wire and regular ZkProgram need explicit boundary rules
+
+**Context:** Routing the regular o1js N0 ZkProgram API through mina-runtime
+instead of calling proof-systems directly.
+
+**What happened:** Three boundary details were easy to get subtly wrong. Serde
+fields in named request structs use camelCase, while fields embedded directly in
+enum variants (such as `DropCircuit { circuit_id }`) retain snake_case. A
+compile-time synthesized value can violate user assertions, so recorder
+compilation must capture assertions without validating the dummy witness.
+Finally, public inputs must be witnessed and included with public outputs in the
+recorded application state or the proof does not bind them.
+
+**Root cause:** The original experimental recorder was witness-specific and its
+proof envelope was separate from regular `Proof` / `JsonProof`; neither was a
+reusable, versioned SDK boundary.
+
+**Resolution/Workaround:** `MinaRuntimeClient` centralizes the v1 wire format.
+Regular compilation records symbolic witnessed inputs with dummy-witness
+validation disabled, proving re-records and validates the real witness, and the
+proof payload uses a tagged `mina-runtime-pickles-v1` serialization handled by
+`Proof.toJSON()` / `Proof.fromJSON()`. Verification compares the complete public
+input/output statement before calling mina-runtime.
+
+**Key takeaway:** Keep transport naming, serde spelling, compile-time witness
+policy, and proof serialization centralized; never reconstruct them ad hoc in
+individual o1js APIs.
+
+**Relevant files:** `src/lib/mina-runtime/backend.ts`,
+`src/lib/proof-system/rust-pickles-recorded.ts`,
+`src/lib/proof-system/proof.ts`, `src/lib/proof-system/zkprogram.ts`
 
 <!-- END LOG -->

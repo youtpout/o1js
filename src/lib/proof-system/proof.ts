@@ -1,22 +1,33 @@
-import { areBindingsInitialized, initializeBindings, withThreadPool } from '../../bindings.js';
-import { Pickles, Base64ProofString } from '../../bindings.js';
-import { Field, Bool } from '../provable/wrapped.js';
-import type { FlexibleProvable, InferProvable } from '../provable/types/struct.js';
-import { FeatureFlags } from './feature-flags.js';
-import type { JsonProof } from './zkprogram.js';
-import { Subclass } from '../util/types.js';
+import {
+  Base64ProofString,
+  Pickles,
+  areBindingsInitialized,
+  initializeBindings,
+  withThreadPool,
+} from '../../bindings.js';
 import type { Provable } from '../provable/provable.js';
-import { assert } from '../util/assert.js';
-import { Unconstrained } from '../provable/types/unconstrained.js';
 import { ProvableType } from '../provable/types/provable-intf.js';
-import { ZkProgramContext } from './zkprogram-context.js';
+import type { FlexibleProvable, InferProvable } from '../provable/types/struct.js';
+import { Unconstrained } from '../provable/types/unconstrained.js';
+import { Bool, Field } from '../provable/wrapped.js';
+import { assert } from '../util/assert.js';
+import { Subclass } from '../util/types.js';
+import { FeatureFlags } from './feature-flags.js';
+import {
+  attachRustPicklesProof,
+  decodeRustPicklesProof,
+  encodeRustPicklesProof,
+  getRustPicklesProof,
+} from './rust-pickles.js';
 import { VerificationKey } from './verification-key.js';
+import { ZkProgramContext } from './zkprogram-context.js';
+import type { JsonProof } from './zkprogram.js';
 
 // public API
-export { ProofBase, Proof, DynamicProof, ProofClass };
+export { DynamicProof, Proof, ProofBase, ProofClass };
 
 // internal API
-export { dummyProof, extractProofs, extractProofTypes, type ProofValue };
+export { dummyProof, extractProofTypes, extractProofs, type ProofValue };
 
 type MaxProofs = 0 | 1 | 2;
 
@@ -60,11 +71,14 @@ class ProofBase<Input = any, Output = any> {
 
   toJSON(): JsonProof {
     let fields = this.publicFields();
+    let rustProof = getRustPicklesProof(this);
     return {
       publicInput: fields.input.map(String),
       publicOutput: fields.output.map(String),
       maxProofsVerified: this.maxProofsVerified,
-      proof: Pickles.proofToBase64([this.maxProofsVerified, this.proof]),
+      proof: (rustProof === undefined
+        ? Pickles.proofToBase64([this.maxProofsVerified, this.proof])
+        : encodeRustPicklesProof(rustProof)) as Base64ProofString,
     };
   }
 
@@ -152,6 +166,13 @@ class Proof<Input, Output> extends ProofBase<Input, Output> {
       publicOutput: publicOutputJson,
     }: JsonProof
   ): Promise<Proof<InferProvable<S['publicInputType']>, InferProvable<S['publicOutputType']>>> {
+    let rustProof = decodeRustPicklesProof(proofString);
+    if (rustProof !== undefined) {
+      let fields = publicInputJson.map(Field).concat(publicOutputJson.map(Field));
+      let proof = this.provable.fromFields(fields, [[], [], [{}, maxProofsVerified]]) as any;
+      attachRustPicklesProof(proof, rustProof);
+      return proof;
+    }
     await initializeBindings();
     let [, proof] = Pickles.proofOfBase64(proofString, maxProofsVerified);
     let fields = publicInputJson.map(Field).concat(publicOutputJson.map(Field));

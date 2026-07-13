@@ -12,6 +12,7 @@ import { prefixes } from '../../bindings/crypto/constants.js';
 import { prefixToField } from '../../bindings/lib/binable.js';
 import { EmptyUndefined, EmptyVoid } from '../../bindings/lib/generic.js';
 import { From, InferValue } from '../../bindings/lib/provable-generic.js';
+import { getProofSystemBackend, lockProofSystemBackend } from '../backend.js';
 import { MlArray, MlBool, MlPair, MlResult } from '../ml/base.js';
 import { MlFieldArray, MlFieldConstArray } from '../ml/fields.js';
 import { FieldConst, FieldVar } from '../provable/core/fieldvar.js';
@@ -39,8 +40,6 @@ import {
   extractProofs,
 } from './proof.js';
 import { decodeProverKey, encodeProverKey, parseHeader } from './prover-keys.js';
-import { VerificationKey } from './verification-key.js';
-import { DeclaredProof, ZkProgramContext } from './zkprogram-context.js';
 import {
   compileRecorded,
   proveRecordedBaseCase,
@@ -48,7 +47,9 @@ import {
   proveRecordedN1,
   proveRecordedN1Over,
   proveRecordedN2,
+  recordCircuit,
   verifyRecordedBaseCase,
+  verifyRecordedBaseCaseViaMinaRuntime,
   verifyRecordedN1,
   verifyRecordedN2,
   type RecordedBaseProofHandle,
@@ -57,6 +58,13 @@ import {
   type RecordedN2ProofResult,
   type RecordedProofResult,
 } from './rust-pickles-recorded.js';
+import {
+  attachRustPicklesProof,
+  decodeRustPicklesProof,
+  getRustPicklesProof,
+} from './rust-pickles.js';
+import { VerificationKey } from './verification-key.js';
+import { DeclaredProof, ZkProgramContext } from './zkprogram-context.js';
 
 // public API
 export { Empty, JsonProof, Method, SelfProof, Undefined, Void, ZkProgram, verify };
@@ -128,6 +136,28 @@ async function verify(
   proof: ProofBase<any, any> | JsonProof,
   verificationKey: Base64VerificationKeyString | VerificationKey
 ) {
+  let rustProof =
+    typeof proof.proof === 'string'
+      ? decodeRustPicklesProof(proof.proof)
+      : getRustPicklesProof(proof);
+  if (rustProof !== undefined) {
+    let vk = typeof verificationKey === 'string' ? verificationKey : verificationKey.data;
+    if (!vk.startsWith('mina-runtime-v1:')) return false;
+    let expected =
+      typeof proof.proof === 'string'
+        ? [...proof.publicInput, ...proof.publicOutput]
+        : (proof as ProofBase)
+            .publicFields()
+            .input.concat((proof as ProofBase).publicFields().output)
+            .map((field) => field.toString());
+    if (
+      expected.length !== rustProof.appState.length ||
+      expected.some((field, i) => field !== rustProof.appState[i])
+    ) {
+      return false;
+    }
+    return verifyRecordedBaseCaseViaMinaRuntime(rustProof as RecordedProofResult);
+  }
   await initializeBindings();
   let picklesProof: Pickles.Proof;
   let statement: Pickles.Statement<FieldConst>;
@@ -241,13 +271,13 @@ type InferMethodType<Config extends ConfigBaseType> = {
  *   public output, as well as defining the methods which can be executed provably.
  * @param config.numChunks Optional number of chunks to split each method's circuit into. Use a
  *   value greater than 1 (1 < numChunks <= 4) if a method exceeds the single-circuit row limit
- *   of 2^16; default is 1. Up to 8 chunks are supported if the degree of the constraints of the 
+ *   of 2^16; default is 1. Up to 8 chunks are supported if the degree of the constraints of the
  *   underlying circuit is low enough (e.g. generic gates) so the wrap domain can still be 2.
  * @param config.overrideWrapDomain Optional override for the wrap circuit domain (0 | 1 | 2).
  *   Defaults to a value derived from the maximum proofs verified; set only if you need to force
  *   a specific domain for chunking. In general, uses 0 if no chunking, 1 for 2 chunks, and 2 for
- *   4 chunks. When otherwise needed, the logs guide you through the right choice. If the constraints 
- *   are simple enough (e.g. generic gates), 8 chunks may also use domain 2. 
+ *   4 chunks. When otherwise needed, the logs guide you through the right choice. If the constraints
+ *   are simple enough (e.g. generic gates), 8 chunks may also use domain 2.
  * @returns an object that can be used to compile, prove, and verify the program.
  */
 function ZkProgram<
@@ -313,6 +343,8 @@ function ZkProgram<
 
   proofsEnabled: boolean;
   setProofsEnabled(proofsEnabled: boolean): void;
+  /** Releases native mina-runtime circuit handles owned by this program. */
+  dispose(): void;
   /**
    * Experimental direct Rust Pickles path. This records the selected o1js
    * method into a `RecordedCircuit` and proves/verifies through @o1js/native,
@@ -367,14 +399,14 @@ function ZkProgram<
     verifyN2(result: RecordedN2ProofResult): Promise<boolean>;
   };
 } & {
-    [I in keyof Config['methods']]: Prover<
-      InferProvableOrUndefined<Get<Config, 'publicInput'>>,
-      ProvableOrUndefined<Get<Config, 'publicInput'>>,
-      InferProvableOrVoid<Get<Config, 'publicOutput'>>,
-      InferPrivateInput<Config>[I],
-      InferProvableOrUndefined<InferAuxiliaryOutputs<Config>[I]>
-    >;
-  } {
+  [I in keyof Config['methods']]: Prover<
+    InferProvableOrUndefined<Get<Config, 'publicInput'>>,
+    ProvableOrUndefined<Get<Config, 'publicInput'>>,
+    InferProvableOrVoid<Get<Config, 'publicOutput'>>,
+    InferPrivateInput<Config>[I],
+    InferProvableOrUndefined<InferAuxiliaryOutputs<Config>[I]>
+  >;
+} {
   type PublicInputType = ProvableOrUndefined<Get<Config, 'publicInput'>>;
   type PublicInput = InferProvableOrUndefined<Get<Config, 'publicInput'>>;
   type PublicOutput = InferProvableOrVoid<Get<Config, 'publicOutput'>>;
@@ -447,13 +479,13 @@ function ZkProgram<
 
   let compileOutput:
     | {
-      provers: Pickles.Prover[];
-      maxProofsVerified: 0 | 1 | 2;
-      verify: (
-        statement: Pickles.Statement<FieldConst>,
-        proof: Pickles.Proof
-      ) => Promise<boolean>;
-    }
+        provers: Pickles.Prover[];
+        maxProofsVerified: 0 | 1 | 2;
+        verify: (
+          statement: Pickles.Statement<FieldConst>,
+          proof: Pickles.Proof
+        ) => Promise<boolean>;
+      }
     | undefined;
 
   const programState = createProgramState();
@@ -465,6 +497,7 @@ function ZkProgram<
     withRuntimeTables = false,
     lazyMode = false,
   } = {}) {
+    lockProofSystemBackend();
     doProving = proofsEnabled ?? doProving;
 
     if (doProving) {
@@ -472,6 +505,40 @@ function ZkProgram<
       let gates = methodKeys.map((k) => methodsMeta[k].gates);
       let proofs = methodKeys.map((k) => methodsMeta[k].proofs);
       maxProofsVerified = computeMaxProofsVerified(proofs.map((p) => p.length));
+
+      if (getProofSystemBackend() === 'rust') {
+        if (maxProofsVerified !== 0) {
+          throw Error(
+            'mina-runtime currently supports the regular ZkProgram API for N0 programs only. ' +
+              'Recursive N1/N2 programs remain available through experimentalRustPickles until ' +
+              'serialized previous-proof inputs are implemented in the runtime contract.'
+          );
+        }
+        for (let compiled of rustCompiledMethods.values()) compiled.dispose();
+        rustCompiledMethods.clear();
+        for (let [i, key] of methodKeys.entries()) {
+          let synthesized = privateInputTypes[i].map((type) =>
+            ProvableType.synthesize(ProvableType.get(type))
+          );
+          let inputArgs = hasPublicInput
+            ? [ProvableType.synthesize(publicInputType), ...synthesized]
+            : synthesized;
+          let compiled = await compileRecorded(() =>
+            rustPicklesOutputFieldsForMethod(key, inputArgs as any, true)
+          );
+          rustCompiledMethods.set(key, compiled);
+        }
+        let hash = Field(BigInt(`0x${await digest()}`));
+        let data =
+          'mina-runtime-v1:' +
+          JSON.stringify(
+            methodKeys.map((key) => ({
+              method: String(key),
+              circuit: rustCompiledMethods.get(key)!.circuit,
+            }))
+          );
+        return { verificationKey: new VerificationKey({ data, hash }) };
+      }
 
       let { provers, verify, verificationKey } = await compileProgram({
         publicInputType,
@@ -510,6 +577,8 @@ function ZkProgram<
     InferProvableOrUndefined<AuxiliaryOutputs[K]>
   >;
 
+  let rustCompiledMethods = new Map<MethodKey, RecordedCompiledCircuit>();
+
   function toRegularProver<K extends MethodKey>(key: K, i: number): RegularProver_<K> {
     return async function prove_(inputPublicInput, ...inputArgs) {
       let publicInput = publicInputType.fromValue(inputPublicInput);
@@ -539,9 +608,35 @@ function ZkProgram<
       }
 
       if (compileOutput === undefined) {
+        let rustCompiled = rustCompiledMethods.get(key);
+        if (getProofSystemBackend() === 'rust' && rustCompiled !== undefined) {
+          let publicOutput: PublicOutput = undefined as PublicOutput;
+          let auxiliaryOutput: unknown;
+          let inputArgs = hasPublicInput ? [publicInput, ...args] : args;
+          let recorded = await recordCircuit(async () =>
+            rustPicklesOutputFieldsForMethod(key, inputArgs as any, true, (result) => {
+              publicOutput = result.publicOutput;
+              auxiliaryOutput = result.auxiliaryOutput;
+            })
+          );
+          if (JSON.stringify(recorded.circuit) !== JSON.stringify(rustCompiled.circuit)) {
+            throw Error(
+              `mina-runtime circuit shape changed between compile and prove for ${String(key)}.`
+            );
+          }
+          let result = await rustCompiled.proveBaseCaseWithWitness(recorded.witness);
+          let proof = new SelfProof({
+            publicInput,
+            publicOutput,
+            proof: {} as Pickles.Proof,
+            maxProofsVerified: 0,
+          });
+          attachRustPicklesProof(proof, result as any);
+          return { proof, auxiliaryOutput } as any;
+        }
         throw Error(
           `Cannot prove execution of program.${String(key)}(), no prover found. ` +
-          `Try calling \`await program.compile()\` first, this will cache provers in the background.\nIf you compiled your zkProgram with proofs disabled (\`proofsEnabled = false\`), you have to compile it with proofs enabled first.`
+            `Try calling \`await program.compile()\` first, this will cache provers in the background.\nIf you compiled your zkProgram with proofs disabled (\`proofsEnabled = false\`), you have to compile it with proofs enabled first.`
         );
       }
       let picklesProver = compileOutput.provers[i];
@@ -595,7 +690,9 @@ function ZkProgram<
 
   async function rustPicklesOutputFieldsForMethod<K extends MethodKey>(
     key: K,
-    inputArgs: Parameters<InferMethodType<Config>[K]['method']>
+    inputArgs: Parameters<InferMethodType<Config>[K]['method']>,
+    includePublicInput = false,
+    onResult?: (result: { publicOutput: PublicOutput; auxiliaryOutput: unknown }) => void
   ): Promise<Field[]> {
     let methodIndex = methodKeys.indexOf(key);
     if (methodIndex === -1) throw Error(`Unknown ZkProgram method '${String(key)}'`);
@@ -603,7 +700,8 @@ function ZkProgram<
     let publicInput: PublicInput | undefined = undefined;
     let privateInputValues: unknown[];
     if (hasPublicInput) {
-      publicInput = publicInputType.fromValue(inputArgs[0] as PublicInput);
+      let publicInputValue = publicInputType.fromValue(inputArgs[0] as PublicInput);
+      publicInput = Provable.witness(publicInputType, () => publicInputValue);
       privateInputValues = inputArgs.slice(1);
     } else {
       privateInputValues = inputArgs;
@@ -626,8 +724,26 @@ function ZkProgram<
         (hasPublicInput
           ? await (methods[key].method as any)(publicInput, ...args)
           : await (methods[key].method as any)(...args)) ?? {};
-      if (publicOutputType === Undefined || publicOutputType === Void) return [];
-      return publicOutputType.toFields(result.publicOutput);
+      let outputFields =
+        publicOutputType === Undefined || publicOutputType === Void
+          ? []
+          : publicOutputType.toFields(result.publicOutput);
+      if (onResult !== undefined) {
+        let constantOutputFields: Field[] = [];
+        Provable.asProver(() => {
+          constantOutputFields = outputFields.map((field) => field.toConstant());
+        });
+        let publicOutput =
+          publicOutputType === Undefined || publicOutputType === Void
+            ? result.publicOutput
+            : publicOutputType.fromFields(
+                constantOutputFields,
+                publicOutputType.toAuxiliary(result.publicOutput)
+              );
+        onResult({ ...result, publicOutput });
+      }
+      if (!includePublicInput || !hasPublicInput) return outputFields;
+      return [...publicInputType.toFields(publicInput), ...outputFields];
     } finally {
       ZkProgramContext.leave(id);
     }
@@ -709,6 +825,20 @@ function ZkProgram<
     if (!doProving) {
       return Promise.resolve(true);
     }
+    let rustProof = getRustPicklesProof(proof);
+    if (rustProof !== undefined) {
+      let expected = [
+        ...publicInputType.toFields(proof.publicInput),
+        ...publicOutputType.toFields(proof.publicOutput),
+      ].map((field) => field.toString());
+      if (
+        expected.length !== rustProof.appState.length ||
+        expected.some((field, i) => field !== rustProof.appState[i])
+      ) {
+        return Promise.resolve(false);
+      }
+      return verifyRecordedBaseCase(rustProof as RecordedProofResult);
+    }
     if (compileOutput?.verify === undefined) {
       throw Error(
         `Cannot verify proof, verification key not found. Try calling \`await program.compile()\` first.`
@@ -753,6 +883,10 @@ function ZkProgram<
       proofsEnabled: doProving,
       setProofsEnabled(proofsEnabled: boolean) {
         doProving = proofsEnabled;
+      },
+      dispose() {
+        for (let compiled of rustCompiledMethods.values()) compiled.dispose();
+        rustCompiledMethods.clear();
       },
     },
     provers
@@ -806,7 +940,7 @@ type ZkProgram<
  * });
  * ```
  */
-class SelfProof<PublicInput, PublicOutput> extends Proof<PublicInput, PublicOutput> { }
+class SelfProof<PublicInput, PublicOutput> extends Proof<PublicInput, PublicOutput> {}
 
 function sortMethodArguments(
   programName: string,
@@ -836,7 +970,7 @@ function sortMethodArguments(
     if (proof === ProofBase || proof === Proof || proof === DynamicProof) {
       throw Error(
         `You cannot use the \`${proof.name}\` class directly. Instead, define a subclass:\n` +
-        `class MyProof extends ${proof.name}<PublicInput, PublicOutput> { ... }`
+          `class MyProof extends ${proof.name}<PublicInput, PublicOutput> { ... }`
       );
     }
   });
@@ -845,7 +979,7 @@ function sortMethodArguments(
   if (numberOfProofs > 2) {
     throw Error(
       `${programName}.${methodName}() has more than two proof arguments, which is not supported.\n` +
-      `Suggestion: You can merge more than two proofs by merging two at a time in a binary tree.`
+        `Suggestion: You can merge more than two proofs by merging two at a time in a binary tree.`
     );
   }
   return { methodName, args, auxiliaryType };
@@ -1160,7 +1294,7 @@ function picklesRuleFromFunction(
   if (verifiedProofs.length > 2) {
     throw Error(
       `${proofSystemTag.name}.${methodName}() has more than two proof arguments, which is not supported.\n` +
-      `Suggestion: You can merge more than two proofs by merging two at a time in a binary tree.`
+        `Suggestion: You can merge more than two proofs by merging two at a time in a binary tree.`
     );
   }
   let proofsToVerify = verifiedProofs.map((Proof) => {
@@ -1187,7 +1321,7 @@ function picklesRuleFromFunction(
       if (compiledTag === undefined) {
         throw Error(
           `${proofSystemTag.name}.compile() depends on ${tag.name}, but we cannot find compilation output for ${tag.name}.\n` +
-          `Try to run ${tag.name}.compile() first.`
+            `Try to run ${tag.name}.compile() first.`
         );
       }
       return { isSelf: false, tag: compiledTag };
@@ -1286,10 +1420,10 @@ function Prover<ProverData>() {
 
 type Infer<T> =
   T extends Subclass<typeof ProofBase>
-  ? InstanceType<T>
-  : T extends ProvableType
-  ? InferProvableType<T>
-  : never;
+    ? InstanceType<T>
+    : T extends ProvableType
+      ? InferProvableType<T>
+      : never;
 
 type TupleToInstances<T> = {
   [I in keyof T]: Infer<T[I]>;
@@ -1302,18 +1436,18 @@ type PrivateInput = ProvableType | Subclass<typeof ProofBase>;
 
 type MethodReturnType<PublicOutput, AuxiliaryOutput> = PublicOutput extends void
   ? AuxiliaryOutput extends undefined
-  ? void
-  : {
-    auxiliaryOutput: AuxiliaryOutput;
-  }
+    ? void
+    : {
+        auxiliaryOutput: AuxiliaryOutput;
+      }
   : AuxiliaryOutput extends undefined
-  ? {
-    publicOutput: PublicOutput;
-  }
-  : {
-    publicOutput: PublicOutput;
-    auxiliaryOutput: AuxiliaryOutput;
-  };
+    ? {
+        publicOutput: PublicOutput;
+      }
+    : {
+        publicOutput: PublicOutput;
+        auxiliaryOutput: AuxiliaryOutput;
+      };
 
 type Method<
   PublicInput,
@@ -1324,26 +1458,26 @@ type Method<
   },
 > = PublicInput extends undefined
   ? {
-    method(
-      ...args: TupleToInstances<MethodSignature['privateInputs']>
-    ): Promise<
-      MethodReturnType<
-        PublicOutput,
-        InferProvableOrUndefined<Get<MethodSignature, 'auxiliaryOutput'>>
-      >
-    >;
-  }
+      method(
+        ...args: TupleToInstances<MethodSignature['privateInputs']>
+      ): Promise<
+        MethodReturnType<
+          PublicOutput,
+          InferProvableOrUndefined<Get<MethodSignature, 'auxiliaryOutput'>>
+        >
+      >;
+    }
   : {
-    method(
-      publicInput: PublicInput,
-      ...args: TupleToInstances<MethodSignature['privateInputs']>
-    ): Promise<
-      MethodReturnType<
-        PublicOutput,
-        InferProvableOrUndefined<Get<MethodSignature, 'auxiliaryOutput'>>
-      >
-    >;
-  };
+      method(
+        publicInput: PublicInput,
+        ...args: TupleToInstances<MethodSignature['privateInputs']>
+      ): Promise<
+        MethodReturnType<
+          PublicOutput,
+          InferProvableOrUndefined<Get<MethodSignature, 'auxiliaryOutput'>>
+        >
+      >;
+    };
 
 type RegularProver<
   PublicInput,
@@ -1367,16 +1501,16 @@ type Prover<
   AuxiliaryOutput,
 > = PublicInput extends undefined
   ? (...args: TupleFrom<Args>) => Promise<{
-    proof: Proof<PublicInput, PublicOutput>;
-    auxiliaryOutput: AuxiliaryOutput;
-  }>
+      proof: Proof<PublicInput, PublicOutput>;
+      auxiliaryOutput: AuxiliaryOutput;
+    }>
   : (
-    publicInput: From<PublicInputType>,
-    ...args: TupleFrom<Args>
-  ) => Promise<{
-    proof: Proof<PublicInput, PublicOutput>;
-    auxiliaryOutput: AuxiliaryOutput;
-  }>;
+      publicInput: From<PublicInputType>,
+      ...args: TupleFrom<Args>
+    ) => Promise<{
+      proof: Proof<PublicInput, PublicOutput>;
+      auxiliaryOutput: AuxiliaryOutput;
+    }>;
 
 type ProvableOrUndefined<A> = A extends undefined ? typeof Undefined : ToProvable<A>;
 type ProvableOrVoid<A> = A extends undefined ? typeof Void : ToProvable<A>;
@@ -1384,8 +1518,8 @@ type ProvableOrVoid<A> = A extends undefined ? typeof Void : ToProvable<A>;
 type InferProvableOrUndefined<A> = A extends undefined
   ? undefined
   : A extends ProvableType
-  ? InferProvable<A>
-  : InferProvable<A> | undefined;
+    ? InferProvable<A>
+    : InferProvable<A> | undefined;
 type InferProvableOrVoid<A> = A extends undefined ? void : InferProvable<A>;
 
 type UnwrapPromise<P> = P extends Promise<infer T> ? T : never;

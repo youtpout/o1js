@@ -19,6 +19,50 @@ type RustPicklesProof = {
   sideLoadedVerificationKeyBase58: string;
 };
 
+type RustPicklesProofPayload = {
+  appState: string[];
+  proof: RustPicklesJsonProof;
+};
+
+const rustProofPrefix = 'mina-runtime-pickles-v1:';
+const rustProofPayloads = new WeakMap<object, RustPicklesProofPayload>();
+
+function attachRustPicklesProof(target: object, payload: RustPicklesProofPayload) {
+  assertRustPicklesJsonProof(payload.proof);
+  rustProofPayloads.set(target, payload);
+}
+
+function getRustPicklesProof(target: object) {
+  return rustProofPayloads.get(target);
+}
+
+function encodeRustPicklesProof(payload: RustPicklesProofPayload): string {
+  assertRustPicklesJsonProof(payload.proof);
+  return rustProofPrefix + JSON.stringify(payload);
+}
+
+function decodeRustPicklesProof(value: string): RustPicklesProofPayload | undefined {
+  if (!value.startsWith(rustProofPrefix)) return undefined;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(value.slice(rustProofPrefix.length));
+  } catch {
+    throw Error('Invalid mina-runtime Pickles proof: expected JSON payload');
+  }
+  if (typeof payload !== 'object' || payload === null) {
+    throw Error('Invalid mina-runtime Pickles proof payload');
+  }
+  let result = payload as Partial<RustPicklesProofPayload>;
+  if (
+    !Array.isArray(result.appState) ||
+    result.appState.some((field) => typeof field !== 'string')
+  ) {
+    throw Error('Invalid mina-runtime Pickles proof application state');
+  }
+  assertRustPicklesJsonProof(result.proof);
+  return { appState: [...result.appState], proof: result.proof };
+}
+
 const decimalFieldRegex = /^(0|[1-9][0-9]*)$/;
 const standardBase64Regex = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const base58Regex = /^[1-9A-HJ-NP-Za-km-z]+$/;
@@ -61,8 +105,9 @@ function rustPicklesProofToJSONString(proof: RustPicklesProof): string {
 async function rustPicklesProveSquareBaseCase(witness: bigint | number | string) {
   let { initializeBindings, wasm } = await import('../../bindings.js');
   await initializeBindings();
-  let prove = (wasm as unknown as { rust_pickles_square_base_proof_json?: (witness: string) => string })
-    .rust_pickles_square_base_proof_json;
+  let prove = (
+    wasm as unknown as { rust_pickles_square_base_proof_json?: (witness: string) => string }
+  ).rust_pickles_square_base_proof_json;
   if (typeof prove !== 'function') {
     throw Error(
       'Rust Pickles native backend is not available. Call setBackend("native") before initializeBindings() and build @o1js/native from proof-systems.'
@@ -105,10 +150,14 @@ function assertRustPicklesJsonProof(value: unknown): asserts value is RustPickle
 
 export {
   assertRustPicklesJsonProof,
+  attachRustPicklesProof,
+  decodeRustPicklesProof,
+  encodeRustPicklesProof,
+  getRustPicklesProof,
   rustPicklesProofFromJSON,
   rustPicklesProofFromJSONString,
-  rustPicklesProveSquareBaseCase,
   rustPicklesProofToJSON,
   rustPicklesProofToJSONString,
+  rustPicklesProveSquareBaseCase,
 };
-export type { RustPicklesJsonProof, RustPicklesProof };
+export type { RustPicklesJsonProof, RustPicklesProof, RustPicklesProofPayload };
