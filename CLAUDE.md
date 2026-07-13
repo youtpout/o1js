@@ -191,6 +191,33 @@ blockers and must stay visible in the parity gate. The existing
 `experimentalRustPickles` surface remains the compatibility API for recursion
 until those proof inputs use the same serialized runtime contract.
 
+### Backend parity gate
+
+`npm run mina-runtime:parity` now executes the same regular N0 `ZkProgram` in
+isolated jsoo and Rust processes. It covers public input/output binding,
+compile/prove/verify, `Proof` JSON round trips, global `verify()`, tamper
+rejection, method digest, row count, and gate histogram. The first measured run
+passes all of those checks on both implementations; the method digest, rows, and
+gate histogram are identical.
+
+The gate deliberately keeps the two dependency graphs separate:
+
+- jsoo uses the WASM Kimchi build from the unmodified official Mina submodule;
+- Rust uses `mina-runtime` and the `proof-systems/pickle-rs` N-API build.
+
+Do not point Mina's internal `proof-systems` submodule at `pickle-rs` and do not
+patch generated Pickles `.ml` files. Doing so couples the reference frontend to
+an incompatible prover and manifests as
+`rest of division by vanishing polynomial` during jsoo proving. o1js now pins
+Mina to the official parent of the old experimental `d53310c` submodule commit;
+Rust integration belongs in `mina-rust`/`mina-runtime` instead.
+
+The release report remains red only for real feature/format gaps: canonical
+proof and VK formats, cross-backend verification, regular N1/N2 recursion,
+SmartContract proofs, proving-index cache round trips, and browser runtime
+integration. jsoo remains available as the reference and fallback until these
+capabilities are implemented 1:1.
+
 ### Phase 7 — provide the same backend through Rust WASM
 
 Expose the same compile/prove/verify and IR API from `kimchi-wasm`. Native and

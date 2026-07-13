@@ -100,7 +100,9 @@
     "native:prepublish": "./scripts/prepublish/native/prepublish-native-package.sh",
     "native:publish": "./scripts/publish/native/publish-native-package.sh",
     "check:version-sync": "node scripts/check-version-sync.mjs",
-    "sync:native-version": "node scripts/sync-native-version.mjs"
+    "sync:native-version": "node scripts/sync-native-version.mjs",
+    "mina-runtime:parity": "node scripts/tests/mina-runtime-release-gate.mjs --output=tests/mina-runtime/reports/latest.json",
+    "mina-runtime:release-gate": "node scripts/tests/mina-runtime-release-gate.mjs --enforce --output=tests/mina-runtime/reports/latest.json"
   },
   "author": "O(1) Labs",
   "devDependencies": {

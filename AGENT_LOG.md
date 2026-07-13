@@ -227,4 +227,43 @@ individual o1js APIs.
 `src/lib/proof-system/rust-pickles-recorded.ts`,
 `src/lib/proof-system/proof.ts`, `src/lib/proof-system/zkprogram.ts`
 
+---
+
+date: 2026-07-14 agent: codex session: mina-runtime-parity-gate category:
+architecture severity: critical tags: [mina, jsoo, kimchi, parity, submodules]
+
+---
+
+### Keep the jsoo reference and experimental Rust dependency graphs separate
+
+**Context:** Building a release gate that executes the same regular N0
+`ZkProgram` through jsoo and mina-runtime.
+
+**What happened:** jsoo compiled circuits but every proof failed with
+`rest of division by vanishing polynomial`. Rebuilding native bindings did not
+help. The Mina submodule had been moved to an experimental commit that
+redirected its internal `proof-systems` dependency, and Dune regenerated Pickles
+`.ml` files against that revision. A second trap in the probe hard-coded
+`setBackend('native')` and silently ignored attempts to select the matching jsoo
+WASM transport.
+
+**Root cause:** The OCaml circuit frontend and the Kimchi prover came from
+different proof-system revisions. The constraint system compiled successfully,
+but its quotient polynomial did not match the prover implementation.
+
+**Resolution/Workaround:** Pin `src/mina` to the official parent before the
+experimental proof-systems redirection. Build jsoo and its WASM from that same
+Mina revision. Run the jsoo reference with this WASM, while mina-runtime uses
+the native N-API module built from `proof-systems/pickle-rs`. The parity probe
+must respect `O1JS_BACKEND` instead of hard-coding a transport.
+
+**Key takeaway:** Never patch generated Pickles `.ml` files or point Mina's
+internal proof-systems submodule at the experimental Rust branch. Integrate Rust
+through `mina-rust`/`mina-runtime`; preserve Mina as an immutable jsoo reference
+until feature parity is complete.
+
+**Relevant files:** `src/mina`, `src/tests/mina-runtime-parity-probe.ts`,
+`scripts/tests/mina-runtime-release-gate.mjs`,
+`.github/workflows/mina-runtime.yml`
+
 <!-- END LOG -->

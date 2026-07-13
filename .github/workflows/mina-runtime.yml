@@ -1,0 +1,64 @@
+name: mina-runtime parity
+
+on:
+  pull_request:
+  push:
+    branches: [pickle-rust]
+  workflow_dispatch:
+
+jobs:
+  native-parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/checkout@v4
+        with:
+          repository: youtpout/proof-systems
+          ref: pickle-rs
+          path: proof-systems
+
+      - uses: actions/checkout@v4
+        with:
+          repository: youtpout/mina-rust
+          ref: pickle-rs
+          path: mina-rust
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: npm ci
+      - name: Build reference jsoo and WASM bindings
+        run: |
+          npm run build:wasm:node
+          npm run build:jsoo:node
+      - name: Build o1js native cryptography
+        run: PROOF_SYSTEMS_ROOT="$GITHUB_WORKSPACE/proof-systems" npm run build:native
+      - name: Build mina-runtime N-API
+        working-directory: mina-rust
+        run: cargo build --release -p mina-runtime-napi
+      - name: Install mina-runtime Node module
+        run: cp mina-rust/target/release/libmina_runtime_napi.so /tmp/mina_runtime_napi.node
+      - name: Build o1js
+        run: npm run build
+      - name: Collect parity matrix
+        env:
+          O1JS_MINA_RUNTIME_PATH: /tmp/mina_runtime_napi.node
+        run: npm run mina-runtime:parity
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mina-runtime-parity
+          path: tests/mina-runtime/reports/latest.json
+
+      - name: Enforce release gate
+        if: vars.MINA_RUNTIME_ENFORCE == 'true'
+        env:
+          O1JS_MINA_RUNTIME_PATH: /tmp/mina_runtime_napi.node
+        run: npm run mina-runtime:release-gate
