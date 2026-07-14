@@ -238,6 +238,16 @@ standalone verification. Node base→N1 proving and verification are validated i
 `~/Projects/zkapp-rust`. This is not yet the high-level mina-runtime transport:
 regular `O1JS_PROOF_SYSTEM=rust` programs still require the N-API adapter.
 
+The Rust WASM exports must execute inside `withThreadPool()`, and the exported
+Rust functions must in turn enter `rayon::ThreadPool::install`; initializing
+workers alone does not route Rayon work into that pool. The benchmark uses 16
+workers for both backends and disables the o1js proving-key cache. On the
+2026-07-14 AddZkProgram base→N1 benchmark, JSOO takes 18.447 s total and Rust
+29.110 s. Rust standalone verification is already faster (92/93 ms versus
+233/235 ms) because Tick/Tock SRSes are shared; the remaining gap is index
+construction and proving (10.193 s base + 18.281 s N1). Reusable compiled
+program indexes remain the highest-priority performance milestone.
+
 Exit criterion: the browser bundle can compile, prove, verify, serialize, and
 resume recursive chains without loading OCaml-generated JavaScript.
 

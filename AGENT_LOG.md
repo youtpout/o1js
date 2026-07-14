@@ -404,4 +404,42 @@ the recursive prover was running in WASM.
 `src/bindings/compiled/node_bindings/kimchi_wasm.cjs`,
 `~/Projects/zkapp-rust/contracts/src/AddZkProgram.bench.ts`
 
+date: 2026-07-14 agent: codex session: pickles-rust-wasm-performance category:
+performance severity: high tags: [pickles, wasm, rayon, srs, benchmark]
+
+---
+
+### WASM workers only help when Pickles enters the Rayon pool
+
+**Context:** The no-cache AddZkProgram base→N1 benchmark initially measured
+about 194 seconds for Rust WASM versus 18 seconds for JSOO WASM.
+
+**What happened:** o1js initialized a WASM worker pool, but the experimental
+Pickles exports ran outside `rayon::ThreadPool::install`. Every Rayon operation
+therefore stayed on the calling thread. Standalone verification also rebuilt a
+full 2^15 Pallas SRS for every proof, while circuit compilation repeatedly
+regenerated the protocol-fixed Tick and Tock SRSes.
+
+**Resolution/Workaround:** Wrap every Rust Pickles WASM operation in
+`withThreadPool()` on the TypeScript side and `run_in_pool()` at the Rust export
+boundary. Share curve-specific 2^16 Vesta and 2^15 Pallas SRSes across Snarky
+compilation, proving, and standalone verification. Base proving also skips the
+unused bootstrap wrap proof and reuses the exact Step index in its final pass.
+Sixteen workers performed best on the benchmark machine. Rust dropped from about
+194 seconds to 29.110 seconds; verification dropped to 92/93 ms and is faster
+than JSOO's 233/235 ms. `wasm-opt -O4`, SIMD128, generic SRS caches, parallel
+SRS construction, and removing local self-verification were neutral or
+regressive and were reverted.
+
+**Key takeaway:** Worker initialization is not execution context. Enter the
+custom Rayon pool at every long-running WASM export, and cache protocol-fixed
+cryptographic setup by curve. The remaining proving gap needs reusable compiled
+program indexes, not more blind compiler flags.
+
+**Relevant files:** `src/lib/proof-system/rust-pickles-recorded.ts`,
+`~/Projects/proof-systems/kimchi-wasm/src/pickles.rs`,
+`~/Projects/proof-systems/snarky/src/api.rs`,
+`~/Projects/proof-systems/pickles/src/common.rs`,
+`~/Projects/zkapp-rust/contracts/src/AddZkProgram.bench.ts`
+
 <!-- END LOG -->

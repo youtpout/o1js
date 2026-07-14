@@ -14,7 +14,7 @@
  * EC addition, range checks and lookups. Other gates throw during recording
  * until their recorder is wired up.
  */
-import { Snarky, initializeBindings, wasm } from '../../bindings.js';
+import { Snarky, initializeBindings, wasm, withThreadPool } from '../../bindings.js';
 import { flattenFieldVar } from '../../native/snarky.js';
 import { getBackendPreference, getProofSystemBackend } from '../backend.js';
 import {
@@ -528,6 +528,11 @@ async function rustPicklesBindings(): Promise<RustPicklesBindings> {
   return native as RustPicklesBindings;
 }
 
+async function runRustPickles<T>(run: () => T | Promise<T>): Promise<T> {
+  if (getBackendPreference() !== 'wasm') return run();
+  return withThreadPool(async () => run());
+}
+
 function circuitJsonOf(compiled: Pick<RecordedCompiledCircuit, 'circuit'>): string {
   return JSON.stringify(compiled.circuit);
 }
@@ -557,7 +562,9 @@ async function proveRecordedBaseCaseCompiled(
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_base — rebuild it.');
   }
   return JSON.parse(
-    native.rust_pickles_prove_recorded_base(circuitJsonOf(compiled), compiled.witness)
+    await runRustPickles(() =>
+      native.rust_pickles_prove_recorded_base!(circuitJsonOf(compiled), compiled.witness)
+    )
   );
 }
 
@@ -589,9 +596,8 @@ async function proveRecordedBaseCaseKeepCompiled(
   ) {
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_base_keep — rebuild it.');
   }
-  let handle = native.rust_pickles_prove_recorded_base_keep(
-    circuitJsonOf(compiled),
-    compiled.witness
+  let handle = await runRustPickles(() =>
+    native.rust_pickles_prove_recorded_base_keep!(circuitJsonOf(compiled), compiled.witness)
   );
   let envelope = JSON.parse(native.rust_pickles_recorded_base_envelope(handle));
   return { handle, ...envelope };
@@ -619,10 +625,12 @@ async function proveRecordedN1OverCompiled(
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1_over — rebuild it.');
   }
   return JSON.parse(
-    native.rust_pickles_prove_recorded_n1_over(
-      previous.handle,
-      circuitJsonOf(compiled),
-      compiled.witness
+    await runRustPickles(() =>
+      native.rust_pickles_prove_recorded_n1_over!(
+        previous.handle,
+        circuitJsonOf(compiled),
+        compiled.witness
+      )
     )
   );
 }
@@ -710,7 +718,9 @@ async function proveRecordedN1Compiled(
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1 — rebuild it.');
   }
   return JSON.parse(
-    native.rust_pickles_prove_recorded_n1(circuitJsonOf(compiled), compiled.witness)
+    await runRustPickles(() =>
+      native.rust_pickles_prove_recorded_n1!(circuitJsonOf(compiled), compiled.witness)
+    )
   );
 }
 
@@ -726,10 +736,12 @@ async function proveRecordedStableN1Compiled(
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_stable_n1 — rebuild it.');
   }
   return JSON.parse(
-    native.rust_pickles_prove_recorded_stable_n1(
-      circuitJsonOf(compiled),
-      compiled.witness,
-      additionalStableCycles
+    await runRustPickles(() =>
+      native.rust_pickles_prove_recorded_stable_n1!(
+        circuitJsonOf(compiled),
+        compiled.witness,
+        additionalStableCycles
+      )
     )
   );
 }
@@ -759,11 +771,13 @@ async function proveRecordedN2Compiled(
     throw Error('proveRecordedN2 expects both executions to record the same circuit shape');
   }
   return JSON.parse(
-    native.rust_pickles_prove_recorded_n2(
-      circuitJson,
-      first.witness,
-      second.witness,
-      appStateToDecimal(appState)
+    await runRustPickles(() =>
+      native.rust_pickles_prove_recorded_n2!(
+        circuitJson,
+        first.witness,
+        second.witness,
+        appStateToDecimal(appState)
+      )
     )
   );
 }
@@ -902,11 +916,8 @@ async function verifyRecordedBaseCase(result: RecordedProofResult): Promise<bool
   if (!native.rust_pickles_verify_side_loaded) {
     throw Error('@o1js/native does not expose rust_pickles_verify_side_loaded — rebuild it.');
   }
-  return native.rust_pickles_verify_side_loaded(
-    result.appState,
-    [],
-    [],
-    JSON.stringify(result.proof)
+  return runRustPickles(() =>
+    native.rust_pickles_verify_side_loaded!(result.appState, [], [], JSON.stringify(result.proof))
   );
 }
 
@@ -943,12 +954,14 @@ async function verifyRecordedN2(result: RecordedN2ProofResult): Promise<boolean>
       '@o1js/native does not expose rust_pickles_verify_side_loaded_with_step_vk — rebuild it.'
     );
   }
-  return native.rust_pickles_verify_side_loaded_with_step_vk(
-    result.appState,
-    result.dlogPlonkIndex,
-    result.challengePolynomialCommitments,
-    result.oldBulletproofChallenges,
-    JSON.stringify(result.proof)
+  return runRustPickles(() =>
+    native.rust_pickles_verify_side_loaded_with_step_vk!(
+      result.appState,
+      result.dlogPlonkIndex,
+      result.challengePolynomialCommitments,
+      result.oldBulletproofChallenges,
+      JSON.stringify(result.proof)
+    )
   );
 }
 
@@ -960,11 +973,13 @@ async function verifyRecordedN1(result: RecordedN1ProofResult): Promise<boolean>
       '@o1js/native does not expose rust_pickles_verify_side_loaded_with_step_vk — rebuild it.'
     );
   }
-  return native.rust_pickles_verify_side_loaded_with_step_vk(
-    result.appState,
-    result.dlogPlonkIndex,
-    [result.challengePolynomialCommitment],
-    [result.oldBulletproofChallenges],
-    JSON.stringify(result.proof)
+  return runRustPickles(() =>
+    native.rust_pickles_verify_side_loaded_with_step_vk!(
+      result.appState,
+      result.dlogPlonkIndex,
+      [result.challengePolynomialCommitment],
+      [result.oldBulletproofChallenges],
+      JSON.stringify(result.proof)
+    )
   );
 }
