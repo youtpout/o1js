@@ -240,13 +240,20 @@ regular `O1JS_PROOF_SYSTEM=rust` programs still require the N-API adapter.
 
 The Rust WASM exports must execute inside `withThreadPool()`, and the exported
 Rust functions must in turn enter `rayon::ThreadPool::install`; initializing
-workers alone does not route Rayon work into that pool. The benchmark uses 16
-workers for both backends and disables the o1js proving-key cache. On the
-2026-07-14 AddZkProgram base→N1 benchmark, JSOO takes 18.447 s total and Rust
-29.110 s. Rust standalone verification is already faster (92/93 ms versus
-233/235 ms) because Tick/Tock SRSes are shared; the remaining gap is index
-construction and proving (10.193 s base + 18.281 s N1). Reusable compiled
-program indexes remain the highest-priority performance milestone.
+workers alone does not route Rayon work into that pool. Reusable compiled
+handles now retain the base and N1 Step/Wrap indexes in WASM or N-API memory;
+the circuit witness is a proving input and no longer captured by the compiled
+Wrap/recursive-Step circuit. `compileN1Over()` compiles an N1 transition against
+a retained base proof, and both compiled handles support repeated proving.
+
+The 2026-07-14 AddZkProgram benchmark disables the o1js key cache and covers
+JSOO/Rust on WASM/native. Once compiled, Rust proving is faster than JSOO:
+2.818 + 5.543 s versus 3.559 + 5.215 s on WASM, and 1.440 + 2.969 s versus
+2.222 + 3.820 s natively. Rust verification is also faster. Cold totals remain
+slower (33.359 s versus 18.540 s WASM; 18.020 s versus 10.663 s native) because
+Rust N1 compilation still generates a temporary recursive Step proof to derive
+the Wrap compilation witness. Removing that temporary proof is now the main
+performance milestone; proving-index reuse itself is complete for N0/N1.
 
 Exit criterion: the browser bundle can compile, prove, verify, serialize, and
 resume recursive chains without loading OCaml-generated JavaScript.

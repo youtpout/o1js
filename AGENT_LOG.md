@@ -442,4 +442,44 @@ program indexes, not more blind compiler flags.
 `~/Projects/proof-systems/pickles/src/common.rs`,
 `~/Projects/zkapp-rust/contracts/src/AddZkProgram.bench.ts`
 
+date: 2026-07-14 agent: codex session: pickles-compiled-indexes category:
+performance severity: high tags: [pickles, compiled-index, wasm, napi,
+benchmark]
+
+---
+
+### Compiled Pickles handles must keep indexes while taking witnesses at prove time
+
+**Context:** Rust base and N1 proving recompiled every Step and Wrap index for
+every proof, unlike JSOO's `ZkProgram.compile()` / prover split.
+
+**What happened:** `WrapCircuit` and `RecursiveStepCircuit` captured their
+witness data in the circuit object. That made the Snarky prover index appear
+single-use even though the constraint system is stable across witnesses.
+`experimentalRustPickles.compile()` also recorded a circuit but retained no
+direct Rust indexes.
+
+**Resolution/Workaround:** Move Wrap and recursive-Step witness data into their
+`PrivateInput`, retain typed Step/Wrap prover and verifier indexes behind opaque
+WASM/N-API handles, and expose `compileN1Over()` for the first recursive
+transition. Tests prove multiple base witnesses from one index set and prove N1
+through retained indexes. Wrap gate parity remains a full 8192-row match.
+
+On the no-cache four-backend benchmark, compiled Rust proving is at parity or
+better: base+N1 proving is 8.361 s Rust versus 8.774 s JSOO in WASM and 4.409 s
+versus 6.042 s native. Cold totals are 33.359/18.540 s (Rust/JSOO WASM) and
+18.020/10.663 s (Rust/JSOO native) because N1 compilation still creates one
+temporary recursive Step proof before it can compile the Wrap index.
+
+**Key takeaway:** A reusable index requires witness data to enter through the
+prover, not live in the circuit value captured during compilation. The next
+optimization target is construction of the recursive Wrap compilation witness
+without producing a temporary cryptographic Step proof.
+
+**Relevant files:** `src/lib/proof-system/rust-pickles-recorded.ts`,
+`src/lib/proof-system/zkprogram.ts`,
+`~/Projects/proof-systems/pickles/src/api.rs`,
+`~/Projects/proof-systems/pickles/src/recursive_step.rs`,
+`~/Projects/zkapp-rust/contracts/src/AddZkProgram.bench.ts`
+
 <!-- END LOG -->

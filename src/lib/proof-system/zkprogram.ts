@@ -42,6 +42,7 @@ import {
 import { decodeProverKey, encodeProverKey, parseHeader } from './prover-keys.js';
 import {
   compileRecorded,
+  compileRecordedN1Over,
   proveRecordedBaseCase,
   proveRecordedBaseCaseKeep,
   proveRecordedN1,
@@ -55,6 +56,7 @@ import {
   verifyRecordedProofViaMinaRuntime,
   type RecordedBaseProofHandle,
   type RecordedCompiledCircuit,
+  type RecordedCompiledN1Circuit,
   type RecordedN1ProofResult,
   type RecordedN2ProofResult,
   type RecordedProofHandle,
@@ -366,6 +368,11 @@ function ZkProgram<
       methodName: K,
       ...args: Parameters<InferMethodType<Config>[K]['method']>
     ): Promise<RecordedCompiledCircuit>;
+    compileN1Over<K extends keyof Config['methods']>(
+      previous: RecordedBaseProofHandle,
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ): Promise<RecordedCompiledN1Circuit>;
     proveBaseCase<K extends keyof Config['methods']>(
       methodName: K,
       ...args: Parameters<InferMethodType<Config>[K]['method']>
@@ -837,6 +844,15 @@ function ZkProgram<
       ...args: Parameters<InferMethodType<Config>[K]['method']>
     ) {
       return compileRecorded(() => rustPicklesOutputFieldsForMethod(methodName, args));
+    },
+    async compileN1Over<K extends MethodKey>(
+      previous: RecordedBaseProofHandle,
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ) {
+      return compileRecordedN1Over(previous, () =>
+        rustPicklesOutputFieldsForMethod(methodName, args)
+      );
     },
     async proveBaseCase<K extends MethodKey>(
       methodName: K,

@@ -29,6 +29,7 @@ import type { Field } from '../provable/field.js';
 
 export {
   compileRecorded,
+  compileRecordedN1Over,
   proveRecordedBaseCase,
   proveRecordedBaseCaseKeep,
   proveRecordedN,
@@ -46,6 +47,7 @@ export {
   type RecordedBaseProofHandle,
   type RecordedCircuitJson,
   type RecordedCompiledCircuit,
+  type RecordedCompiledN1Circuit,
   type RecordedN1ProofResult,
   type RecordedN2ProofResult,
   type RecordedProofHandle,
@@ -169,6 +171,19 @@ type RecordedCompiledCircuit = {
   verifyN1(result: RecordedN1ProofResult): Promise<boolean>;
   verifyN2(result: RecordedN2ProofResult): Promise<boolean>;
   dispose(): void;
+};
+
+type RecordedCompiledN1Circuit = {
+  circuit: RecordedCircuitJson;
+  witness: string[];
+  prove(): Promise<RecordedN1ProofResult>;
+  proveWithWitness(witness: string[]): Promise<RecordedN1ProofResult>;
+  dispose(): void;
+};
+
+type DirectRustCompiled = {
+  bindings: RustPicklesBindings;
+  handle: unknown;
 };
 
 type MinaRuntimeCompiled = { client: MinaRuntimeClient; circuitId: number };
@@ -432,6 +447,21 @@ async function recordCircuit(
 }
 
 type RustPicklesBindings = {
+  rust_pickles_compile_recorded_base?: (circuit: string, witness: string[]) => unknown;
+  rust_pickles_prove_recorded_base_keep_compiled?: (
+    compiled: unknown,
+    witness: string[]
+  ) => unknown;
+  rust_pickles_compile_recorded_n1?: (
+    previous: unknown,
+    circuit: string,
+    witness: string[]
+  ) => unknown;
+  rust_pickles_prove_recorded_n1_compiled?: (
+    compiled: unknown,
+    previous: unknown,
+    witness: string[]
+  ) => string;
   rust_pickles_prove_recorded_base?: (circuit: string, witness: string[]) => string;
   rust_pickles_prove_recorded_base_keep?: (circuit: string, witness: string[]) => unknown;
   rust_pickles_recorded_base_envelope?: (handle: unknown) => string;
@@ -544,6 +574,7 @@ function appStateToDecimal(appState: Field[] | string[]): string[] {
 async function proveRecordedBaseCaseCompiled(
   compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'> & {
     minaRuntime?: MinaRuntimeCompiled;
+    directRust?: DirectRustCompiled;
   }
 ): Promise<RecordedProofResult> {
   if (getProofSystemBackend() === 'rust') {
@@ -556,6 +587,19 @@ async function proveRecordedBaseCaseCompiled(
     } finally {
       if (temporary) client.dropCircuit(circuitId);
     }
+  }
+  if (compiled.directRust !== undefined) {
+    let { bindings, handle } = compiled.directRust;
+    if (
+      !bindings.rust_pickles_prove_recorded_base_keep_compiled ||
+      !bindings.rust_pickles_recorded_base_envelope
+    ) {
+      throw Error('Rust Pickles bindings do not expose compiled base proving.');
+    }
+    let proofHandle = await runRustPickles(() =>
+      bindings.rust_pickles_prove_recorded_base_keep_compiled!(handle, compiled.witness)
+    );
+    return JSON.parse(bindings.rust_pickles_recorded_base_envelope(proofHandle));
   }
   let native = await rustPicklesBindings();
   if (!native.rust_pickles_prove_recorded_base) {
@@ -571,6 +615,7 @@ async function proveRecordedBaseCaseCompiled(
 async function proveRecordedBaseCaseKeepCompiled(
   compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'> & {
     minaRuntime?: MinaRuntimeCompiled;
+    directRust?: DirectRustCompiled;
   }
 ): Promise<RecordedBaseProofHandle> {
   if (getProofSystemBackend() === 'rust') {
@@ -588,6 +633,20 @@ async function proveRecordedBaseCaseKeepCompiled(
     } finally {
       if (temporary) client.dropCircuit(circuitId);
     }
+  }
+  if (compiled.directRust !== undefined) {
+    let { bindings, handle } = compiled.directRust;
+    if (
+      !bindings.rust_pickles_prove_recorded_base_keep_compiled ||
+      !bindings.rust_pickles_recorded_base_envelope
+    ) {
+      throw Error('Rust Pickles bindings do not expose compiled base proving.');
+    }
+    let proofHandle = await runRustPickles(() =>
+      bindings.rust_pickles_prove_recorded_base_keep_compiled!(handle, compiled.witness)
+    );
+    let envelope = JSON.parse(bindings.rust_pickles_recorded_base_envelope(proofHandle));
+    return { handle: proofHandle, ...envelope };
   }
   let native = await rustPicklesBindings();
   if (
@@ -792,14 +851,31 @@ async function compileRecorded(
 ): Promise<RecordedCompiledCircuit> {
   let recorded = await recordCircuit(f, { validateWitness: false });
   let minaRuntime: MinaRuntimeCompiled | undefined;
+  let directRust: DirectRustCompiled | undefined;
   if (getProofSystemBackend() === 'rust') {
     let client = await minaRuntimeClient();
     let { circuitId } = client.compileCircuit(recorded.circuit);
     minaRuntime = { client, circuitId };
+  } else {
+    let bindings = await rustPicklesBindings();
+    if (!bindings.rust_pickles_compile_recorded_base) {
+      throw Error('Rust Pickles bindings do not expose reusable compiled indexes.');
+    }
+    let handle = await runRustPickles(() =>
+      bindings.rust_pickles_compile_recorded_base!(
+        JSON.stringify(recorded.circuit),
+        recorded.witness
+      )
+    );
+    directRust = { bindings, handle };
   }
-  let compiled: RecordedCompiledCircuit & { minaRuntime?: MinaRuntimeCompiled } = {
+  let compiled: RecordedCompiledCircuit & {
+    minaRuntime?: MinaRuntimeCompiled;
+    directRust?: DirectRustCompiled;
+  } = {
     ...recorded,
     minaRuntime,
+    directRust,
     proveBaseCase: () => proveRecordedBaseCaseCompiled(compiled),
     proveBaseCaseWithWitness: (witness) => proveRecordedBaseCaseCompiled({ ...compiled, witness }),
     proveBaseCaseKeep: () => proveRecordedBaseCaseKeepCompiled(compiled),
@@ -825,6 +901,60 @@ async function compileRecorded(
         compiled.minaRuntime.client.dropCircuit(compiled.minaRuntime.circuitId);
         compiled.minaRuntime = undefined;
       }
+      if (compiled.directRust !== undefined) {
+        let disposable = compiled.directRust.handle as { free?: () => void };
+        disposable.free?.();
+        compiled.directRust = undefined;
+      }
+    },
+  };
+  return compiled;
+}
+
+async function compileRecordedN1Over(
+  previous: RecordedBaseProofHandle,
+  f: () => Field[] | Promise<Field[]>
+): Promise<RecordedCompiledN1Circuit> {
+  let recorded = await recordCircuit(f, { validateWitness: false });
+  if (isMinaRuntimeBaseHandle(previous.handle)) {
+    let { client } = previous.handle;
+    let { circuitId } = client.compileCircuit(recorded.circuit);
+    let minaRuntime = { client, circuitId };
+    let compiled: RecordedCompiledN1Circuit = {
+      ...recorded,
+      prove: () => compiled.proveWithWitness(compiled.witness),
+      proveWithWitness: (witness) =>
+        proveRecordedN1OverCompiled(previous, { ...recorded, witness, minaRuntime }),
+      dispose: () => client.dropCircuit(circuitId),
+    };
+    return compiled;
+  }
+  let bindings = await rustPicklesBindings();
+  if (
+    !bindings.rust_pickles_compile_recorded_n1 ||
+    !bindings.rust_pickles_prove_recorded_n1_compiled
+  ) {
+    throw Error('Rust Pickles bindings do not expose reusable compiled N1 indexes.');
+  }
+  let handle = await runRustPickles(() =>
+    bindings.rust_pickles_compile_recorded_n1!(
+      previous.handle,
+      JSON.stringify(recorded.circuit),
+      recorded.witness
+    )
+  );
+  let compiled: RecordedCompiledN1Circuit = {
+    ...recorded,
+    prove: () => compiled.proveWithWitness(compiled.witness),
+    async proveWithWitness(witness) {
+      return JSON.parse(
+        await runRustPickles(() =>
+          bindings.rust_pickles_prove_recorded_n1_compiled!(handle, previous.handle, witness)
+        )
+      );
+    },
+    dispose() {
+      (handle as { free?: () => void }).free?.();
     },
   };
   return compiled;
