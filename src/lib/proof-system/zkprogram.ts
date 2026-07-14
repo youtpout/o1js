@@ -48,10 +48,11 @@ import {
   proveRecordedN1Over,
   proveRecordedN2,
   recordCircuit,
+  releaseRecordedBaseProofHandle,
   verifyRecordedBaseCase,
-  verifyRecordedBaseCaseViaMinaRuntime,
   verifyRecordedN1,
   verifyRecordedN2,
+  verifyRecordedProofViaMinaRuntime,
   type RecordedBaseProofHandle,
   type RecordedCompiledCircuit,
   type RecordedN1ProofResult,
@@ -60,8 +61,10 @@ import {
 } from './rust-pickles-recorded.js';
 import {
   attachRustPicklesProof,
+  attachRustPicklesProofResource,
   decodeRustPicklesProof,
   getRustPicklesProof,
+  getRustPicklesProofResource,
 } from './rust-pickles.js';
 import { VerificationKey } from './verification-key.js';
 import { DeclaredProof, ZkProgramContext } from './zkprogram-context.js';
@@ -156,7 +159,11 @@ async function verify(
     ) {
       return false;
     }
-    return verifyRecordedBaseCaseViaMinaRuntime(rustProof as RecordedProofResult);
+    return verifyRecordedProofViaMinaRuntime(
+      rustProof.recursion === undefined
+        ? (rustProof as RecordedProofResult)
+        : ({ ...rustProof, ...rustProof.recursion } as RecordedN1ProofResult)
+    );
   }
   await initializeBindings();
   let picklesProof: Pickles.Proof;
@@ -507,13 +514,14 @@ function ZkProgram<
       maxProofsVerified = computeMaxProofsVerified(proofs.map((p) => p.length));
 
       if (getProofSystemBackend() === 'rust') {
-        if (maxProofsVerified !== 0) {
+        if (maxProofsVerified === 2) {
           throw Error(
-            'mina-runtime currently supports the regular ZkProgram API for N0 programs only. ' +
-              'Recursive N1/N2 programs remain available through experimentalRustPickles until ' +
-              'serialized previous-proof inputs are implemented in the runtime contract.'
+            'mina-runtime currently supports regular N0 and one-step N1 ZkPrograms. ' +
+              'N2 programs remain available through experimentalRustPickles until the ' +
+              'width-2 runtime contract is implemented.'
           );
         }
+        releaseRustProofResources();
         for (let compiled of rustCompiledMethods.values()) compiled.dispose();
         rustCompiledMethods.clear();
         for (let [i, key] of methodKeys.entries()) {
@@ -578,10 +586,21 @@ function ZkProgram<
   >;
 
   let rustCompiledMethods = new Map<MethodKey, RecordedCompiledCircuit>();
+  let rustProofResources = new Set<ReturnType<typeof getRustPicklesProofResource>>();
+
+  function releaseRustProofResources() {
+    for (let resource of rustProofResources) resource?.drop();
+    rustProofResources.clear();
+  }
 
   function toRegularProver<K extends MethodKey>(key: K, i: number): RegularProver_<K> {
     return async function prove_(inputPublicInput, ...inputArgs) {
       let publicInput = publicInputType.fromValue(inputPublicInput);
+      // Keep references to proof arguments supplied by the caller. `fromValue()`
+      // reconstructs Proof instances below, which intentionally copies their
+      // public data but cannot copy process-local Rust proof resources stored in
+      // a WeakMap.
+      let suppliedProofs = inputArgs.flatMap((argument) => extractProofs(argument));
       let args = zip(inputArgs, privateInputTypes[i]).map(([arg, type]) =>
         ProvableType.get(type).fromValue(arg)
       );
@@ -624,14 +643,59 @@ function ZkProgram<
               `mina-runtime circuit shape changed between compile and prove for ${String(key)}.`
             );
           }
-          let result = await rustCompiled.proveBaseCaseWithWitness(recorded.witness);
+          let previousProofs = suppliedProofs;
+          if (previousProofs.length > 1) {
+            throw Error('mina-runtime regular N2 proving is not implemented yet.');
+          }
+          let result: RecordedProofResult | RecordedN1ProofResult;
+          let kept: RecordedBaseProofHandle | undefined;
+          if (previousProofs.length === 0 && maxProofsVerified === 1) {
+            kept = await rustCompiled.proveBaseCaseKeepWithWitness(recorded.witness);
+            result = { appState: kept.appState, proof: kept.proof };
+          } else if (previousProofs.length === 1) {
+            let resource = getRustPicklesProofResource(previousProofs[0]);
+            if (resource?.kind !== 'base') {
+              throw Error(
+                'mina-runtime cannot continue this recursive chain: the previous proof was ' +
+                  'serialized or was not produced as a kept base proof in this process.'
+              );
+            }
+            result = await rustCompiled.proveN1OverWithWitness(
+              resource.value as RecordedBaseProofHandle,
+              recorded.witness
+            );
+          } else {
+            result = await rustCompiled.proveBaseCaseWithWitness(recorded.witness);
+          }
           let proof = new SelfProof({
             publicInput,
             publicOutput,
             proof: {} as Pickles.Proof,
-            maxProofsVerified: 0,
+            maxProofsVerified: maxProofsVerified ?? 0,
           });
-          attachRustPicklesProof(proof, result as any);
+          attachRustPicklesProof(proof, {
+            appState: result.appState,
+            proof: result.proof as any,
+            ...('challengePolynomialCommitment' in result
+              ? {
+                  recursion: {
+                    kind: 'n1' as const,
+                    challengePolynomialCommitment: result.challengePolynomialCommitment,
+                    oldBulletproofChallenges: result.oldBulletproofChallenges,
+                    dlogPlonkIndex: result.dlogPlonkIndex,
+                  },
+                }
+              : {}),
+          });
+          if (kept !== undefined) {
+            let resource = {
+              kind: 'base' as const,
+              value: kept,
+              drop: () => releaseRecordedBaseProofHandle(kept),
+            };
+            rustProofResources.add(resource);
+            attachRustPicklesProofResource(proof, resource);
+          }
           return { proof, auxiliaryOutput } as any;
         }
         throw Error(
@@ -640,7 +704,7 @@ function ZkProgram<
         );
       }
       let picklesProver = compileOutput.provers[i];
-      let maxProofsVerified = compileOutput.maxProofsVerified;
+      let compiledMaxProofsVerified = compileOutput.maxProofsVerified;
 
       let { publicInputFields, publicInputAux } = toFieldAndAuxConsts(publicInputType, publicInput);
 
@@ -680,7 +744,7 @@ function ZkProgram<
           publicInput,
           publicOutput,
           proof,
-          maxProofsVerified,
+          maxProofsVerified: compiledMaxProofsVerified,
         }),
         auxiliaryOutput,
       };
@@ -837,7 +901,18 @@ function ZkProgram<
       ) {
         return Promise.resolve(false);
       }
-      return verifyRecordedBaseCase(rustProof as RecordedProofResult);
+      return getProofSystemBackend() === 'rust'
+        ? verifyRecordedProofViaMinaRuntime(
+            rustProof.recursion === undefined
+              ? (rustProof as RecordedProofResult)
+              : ({ ...rustProof, ...rustProof.recursion } as RecordedN1ProofResult)
+          )
+        : rustProof.recursion === undefined
+          ? verifyRecordedBaseCase(rustProof as RecordedProofResult)
+          : verifyRecordedN1({
+              ...rustProof,
+              ...rustProof.recursion,
+            });
     }
     if (compileOutput?.verify === undefined) {
       throw Error(
@@ -885,6 +960,7 @@ function ZkProgram<
         doProving = proofsEnabled;
       },
       dispose() {
+        releaseRustProofResources();
         for (let compiled of rustCompiledMethods.values()) compiled.dispose();
         rustCompiledMethods.clear();
       },

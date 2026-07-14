@@ -22,10 +22,25 @@ type RustPicklesProof = {
 type RustPicklesProofPayload = {
   appState: string[];
   proof: RustPicklesJsonProof;
+  recursion?: RustPicklesRecursion;
+};
+
+type RustPicklesRecursion = {
+  kind: 'n1';
+  challengePolynomialCommitment: [string, string];
+  oldBulletproofChallenges: string[];
+  dlogPlonkIndex: [string, string][];
+};
+
+type RustPicklesProofResource = {
+  kind: 'base';
+  value: unknown;
+  drop(): void;
 };
 
 const rustProofPrefix = 'mina-runtime-pickles-v1:';
 const rustProofPayloads = new WeakMap<object, RustPicklesProofPayload>();
+const rustProofResources = new WeakMap<object, RustPicklesProofResource>();
 
 function attachRustPicklesProof(target: object, payload: RustPicklesProofPayload) {
   assertRustPicklesJsonProof(payload.proof);
@@ -34,6 +49,14 @@ function attachRustPicklesProof(target: object, payload: RustPicklesProofPayload
 
 function getRustPicklesProof(target: object) {
   return rustProofPayloads.get(target);
+}
+
+function attachRustPicklesProofResource(target: object, resource: RustPicklesProofResource) {
+  rustProofResources.set(target, resource);
+}
+
+function getRustPicklesProofResource(target: object) {
+  return rustProofResources.get(target);
 }
 
 function encodeRustPicklesProof(payload: RustPicklesProofPayload): string {
@@ -60,7 +83,44 @@ function decodeRustPicklesProof(value: string): RustPicklesProofPayload | undefi
     throw Error('Invalid mina-runtime Pickles proof application state');
   }
   assertRustPicklesJsonProof(result.proof);
-  return { appState: [...result.appState], proof: result.proof };
+  let recursion = parseRecursion(result.recursion);
+  return { appState: [...result.appState], proof: result.proof, recursion };
+}
+
+function parseRecursion(value: unknown): RustPicklesRecursion | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null) {
+    throw Error('Invalid mina-runtime Pickles recursion metadata');
+  }
+  let recursion = value as Partial<RustPicklesRecursion>;
+  if (
+    recursion.kind !== 'n1' ||
+    !isPoint(recursion.challengePolynomialCommitment) ||
+    !isFields(recursion.oldBulletproofChallenges) ||
+    !Array.isArray(recursion.dlogPlonkIndex) ||
+    !recursion.dlogPlonkIndex.every(isPoint)
+  ) {
+    throw Error('Invalid mina-runtime Pickles N1 metadata');
+  }
+  return {
+    kind: 'n1',
+    challengePolynomialCommitment: [...recursion.challengePolynomialCommitment],
+    oldBulletproofChallenges: [...recursion.oldBulletproofChallenges],
+    dlogPlonkIndex: recursion.dlogPlonkIndex.map((point) => [...point]),
+  };
+}
+
+function isFields(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((field) => typeof field === 'string');
+}
+
+function isPoint(value: unknown): value is [string, string] {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    typeof value[0] === 'string' &&
+    typeof value[1] === 'string'
+  );
 }
 
 const decimalFieldRegex = /^(0|[1-9][0-9]*)$/;
@@ -151,13 +211,21 @@ function assertRustPicklesJsonProof(value: unknown): asserts value is RustPickle
 export {
   assertRustPicklesJsonProof,
   attachRustPicklesProof,
+  attachRustPicklesProofResource,
   decodeRustPicklesProof,
   encodeRustPicklesProof,
   getRustPicklesProof,
+  getRustPicklesProofResource,
   rustPicklesProofFromJSON,
   rustPicklesProofFromJSONString,
   rustPicklesProofToJSON,
   rustPicklesProofToJSONString,
   rustPicklesProveSquareBaseCase,
 };
-export type { RustPicklesJsonProof, RustPicklesProof, RustPicklesProofPayload };
+export type {
+  RustPicklesJsonProof,
+  RustPicklesProof,
+  RustPicklesProofPayload,
+  RustPicklesProofResource,
+  RustPicklesRecursion,
+};

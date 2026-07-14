@@ -76,4 +76,51 @@ describe('MinaRuntimeClient', () => {
       'mina-rust resourceNotFound: missing circuit'
     );
   });
+
+  it('preserves the recursive proof resource contract on the wire', async () => {
+    let seen: unknown[] = [];
+    let client = new MinaRuntimeClient(
+      transport((request) => {
+        seen.push(request);
+        return { operation: request.operation, output: { valid: true } };
+      })
+    );
+    let proof = {
+      version: 1 as const,
+      statement: [],
+      wrap_wire_proof_base64: '',
+      side_loaded_verification_key_base58: '1',
+    };
+    let recursive = {
+      appState: ['3'],
+      proof,
+      challengePolynomialCommitment: ['4', '5'] as [string, string],
+      oldBulletproofChallenges: ['6'],
+      dlogPlonkIndex: [['7', '8']] as [string, string][],
+    };
+
+    await client.proveCircuitKeep(2, ['3']);
+    await client.proveCircuitN1Over(4, 9, ['5']);
+    await client.verifyRecursiveProof(recursive);
+    client.dropProof(9);
+
+    expect(seen).toEqual([
+      { operation: 'proveCircuitKeep', input: { circuitId: 2, witness: ['3'] } },
+      {
+        operation: 'proveCircuitN1Over',
+        input: { circuitId: 4, previousProofId: 9, witness: ['5'] },
+      },
+      {
+        operation: 'verifyRecursiveProof',
+        input: {
+          appState: ['3'],
+          proof,
+          challengePolynomialCommitments: [['4', '5']],
+          oldBulletproofChallenges: [['6']],
+          dlogPlonkIndex: [['7', '8']],
+        },
+      },
+      { operation: 'dropProof', input: { proof_id: 9 } },
+    ]);
+  });
 });

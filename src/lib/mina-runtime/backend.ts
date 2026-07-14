@@ -4,8 +4,10 @@ export {
   MinaRuntimeClient,
   type BackendInfo,
   type CompiledCircuit,
+  type KeptProofResponse,
   type MinaRuntimeTransport,
   type RecordedCircuit,
+  type RecursiveProofResponse,
   type RustProofResponse,
 };
 
@@ -38,6 +40,14 @@ type CompiledCircuit = {
 type RustProofResponse = {
   appState: string[];
   proof: RustPicklesJsonProof;
+};
+
+type KeptProofResponse = RustProofResponse & { proofId: number };
+
+type RecursiveProofResponse = RustProofResponse & {
+  challengePolynomialCommitment: [string, string];
+  oldBulletproofChallenges: string[];
+  dlogPlonkIndex: [string, string][];
 };
 
 type MinaRuntimeTransport = {
@@ -74,10 +84,45 @@ class MinaRuntimeClient {
     return this.#executeAsync<RustProofResponse>('proveCircuit', { circuitId, witness }, signal);
   }
 
+  proveCircuitKeep(circuitId: number, witness: string[], signal?: AbortSignal) {
+    return this.#executeAsync<KeptProofResponse>(
+      'proveCircuitKeep',
+      { circuitId, witness },
+      signal
+    );
+  }
+
+  proveCircuitN1Over(
+    circuitId: number,
+    previousProofId: number,
+    witness: string[],
+    signal?: AbortSignal
+  ) {
+    return this.#executeAsync<RecursiveProofResponse>(
+      'proveCircuitN1Over',
+      { circuitId, previousProofId, witness },
+      signal
+    );
+  }
+
   verifyProof(appState: string[], proof: RustPicklesJsonProof, signal?: AbortSignal) {
     return this.#executeAsync<{ valid: boolean; reason?: string }>(
       'verifyProof',
       { appState, proof },
+      signal
+    );
+  }
+
+  verifyRecursiveProof(result: RecursiveProofResponse, signal?: AbortSignal) {
+    return this.#executeAsync<{ valid: boolean; reason?: string }>(
+      'verifyRecursiveProof',
+      {
+        appState: result.appState,
+        proof: result.proof,
+        challengePolynomialCommitments: [result.challengePolynomialCommitment],
+        oldBulletproofChallenges: [result.oldBulletproofChallenges],
+        dlogPlonkIndex: result.dlogPlonkIndex,
+      },
       signal
     );
   }
@@ -90,6 +135,10 @@ class MinaRuntimeClient {
     // Inline enum fields keep Rust's snake_case spelling in serde; named
     // request structs use camelCase.
     return this.#execute<undefined>('dropCircuit', { circuit_id: circuitId });
+  }
+
+  dropProof(proofId: number) {
+    return this.#execute<undefined>('dropProof', { proof_id: proofId });
   }
 
   #execute<T>(operation: string, input?: unknown): T {

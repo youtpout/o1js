@@ -179,17 +179,20 @@ The first regular API slice is implemented behind `O1JS_PROOF_SYSTEM=rust` or
 - the platform N-API loader (`O1JS_MINA_RUNTIME_PATH` for local builds);
 - regular N0 `ZkProgram.compile()`, method proving, `Program.verify()` and
   global `verify()`;
+- regular N1 `SelfProof` proving from a retained base proof, including
+  `Program.verify()`, global `verify()`, JSON round trips, and tamper rejection;
 - public-input and public-output binding in the Rust application statement;
 - `Proof.toJSON()` / `Proof.fromJSON()` round trips with tamper rejection;
 - explicit circuit-resource disposal and reusable runtime circuit handles;
 - a generic runtime operation entry point for Ledger, signed command, and
   encoding operations.
 
-The switch intentionally rejects regular recursive ZkPrograms. N1/N2, serialized
-previous-proof inputs, and SmartContract prover adaptation remain release
-blockers and must stay visible in the parity gate. The existing
-`experimentalRustPickles` surface remains the compatibility API for recursion
-until those proof inputs use the same serialized runtime contract.
+The switch supports one recursive proof input (N1) when the base proof was
+created and retained in the same process. Serialized N1 proofs are independently
+verifiable, but a serialized base proof cannot yet resume a recursive chain
+because the full native base proof has no stable import/export format. N2,
+cross-process recursive continuation, and SmartContract prover adaptation remain
+release blockers and must stay visible in the parity gate.
 
 ### Backend parity gate
 
@@ -213,10 +216,10 @@ Mina to the official parent of the old experimental `d53310c` submodule commit;
 Rust integration belongs in `mina-rust`/`mina-runtime` instead.
 
 The release report remains red only for real feature/format gaps: canonical
-proof and VK formats, cross-backend verification, regular N1/N2 recursion,
-SmartContract proofs, proving-index cache round trips, and browser runtime
-integration. jsoo remains available as the reference and fallback until these
-capabilities are implemented 1:1.
+proof and VK formats, cross-backend verification, regular N2 recursion,
+cross-process N1 continuation, SmartContract proofs, proving-index cache round
+trips, and browser runtime integration. jsoo remains available as the reference
+and fallback until these capabilities are implemented 1:1.
 
 ### Phase 7 — provide the same backend through Rust WASM
 

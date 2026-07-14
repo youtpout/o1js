@@ -266,4 +266,43 @@ until feature parity is complete.
 `scripts/tests/mina-runtime-release-gate.mjs`,
 `.github/workflows/mina-runtime.yml`
 
+---
+
+date: 2026-07-14 agent: codex session: mina-runtime-regular-n1 category:
+architecture severity: high tags: [mina-runtime, pickles, recursion, resources,
+zkprogram]
+
+---
+
+### Recursive proving needs both serialized proof data and a live base resource
+
+**Context:** Extending the regular Rust-backed `ZkProgram` API from N0 to one
+`SelfProof` input without routing through jsoo.
+
+**What happened:** A base proof serialized enough data for standalone
+verification, but Pickles N1 proving needs the full `RecordedBaseHandle`. The
+first regular call also lost that live handle because `Provable.fromValue()`
+reconstructed the `SelfProof`; its public fields survived while its process-local
+WeakMap resource did not. The first N1 verification attempt also treated nested
+recursion metadata as a base proof.
+
+**Resolution/Workaround:** mina-runtime now owns retained base proofs behind
+opaque IDs and exposes keep, N1-over, recursive verify, and drop operations.
+o1js attaches the ID-backed resource to the proof supplied to the caller, reads
+resources from the original prover arguments before `fromValue()` cloning, and
+flattens tagged N1 metadata for both `Program.verify()` and global `verify()`.
+`Program.dispose()` releases retained proofs. JSON proofs remain verifiable, but
+cannot extend a chain after the live resource is gone.
+
+**Key takeaway:** A recursive proof has two lifetimes: its portable verification
+envelope and its prover-only native continuation state. Do not infer the latter
+from public fields or silently fall back after serialization; expose and release
+it explicitly until a canonical import/export format exists.
+
+**Relevant files:** `src/lib/mina-runtime/backend.ts`,
+`src/lib/proof-system/rust-pickles.ts`,
+`src/lib/proof-system/rust-pickles-recorded.ts`,
+`src/lib/proof-system/zkprogram.ts`,
+`src/tests/mina-runtime-zkprogram-n1.ts`
+
 <!-- END LOG -->

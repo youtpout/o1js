@@ -17,7 +17,11 @@
 import { Snarky, initializeBindings } from '../../bindings.js';
 import { flattenFieldVar } from '../../native/snarky.js';
 import { getProofSystemBackend } from '../backend.js';
-import { MinaRuntimeClient, type RustProofResponse } from '../mina-runtime/backend.js';
+import {
+  MinaRuntimeClient,
+  type RecursiveProofResponse,
+  type RustProofResponse,
+} from '../mina-runtime/backend.js';
 import { FieldConst, FieldType, FieldVar } from '../provable/core/fieldvar.js';
 import { snarkContext } from '../provable/core/provable-context.js';
 import type { Field } from '../provable/field.js';
@@ -32,10 +36,12 @@ export {
   proveRecordedN2,
   proveRecordedStableN1,
   recordCircuit,
+  releaseRecordedBaseProofHandle,
   verifyRecordedBaseCase,
   verifyRecordedBaseCaseViaMinaRuntime,
   verifyRecordedN1,
   verifyRecordedN2,
+  verifyRecordedProofViaMinaRuntime,
   type RecordedBaseProofHandle,
   type RecordedCircuitJson,
   type RecordedCompiledCircuit,
@@ -121,7 +127,7 @@ type RecordedN2ProofResult = RecordedProofResult & {
  * {@link verifyRecordedBaseCase}.
  */
 type RecordedBaseProofHandle = RecordedProofResult & {
-  handle: unknown;
+  handle: MinaRuntimeBaseHandle | unknown;
 };
 
 type RecordedCompiledCircuit = {
@@ -130,6 +136,11 @@ type RecordedCompiledCircuit = {
   proveBaseCase(): Promise<RecordedProofResult>;
   proveBaseCaseWithWitness(witness: string[]): Promise<RecordedProofResult>;
   proveBaseCaseKeep(): Promise<RecordedBaseProofHandle>;
+  proveBaseCaseKeepWithWitness(witness: string[]): Promise<RecordedBaseProofHandle>;
+  proveN1OverWithWitness(
+    previous: RecordedBaseProofHandle,
+    witness: string[]
+  ): Promise<RecordedN1ProofResult>;
   proveN1(): Promise<RecordedN1ProofResult>;
   proveStableN1(additionalStableCycles?: number): Promise<RecordedStableN1ProofResult>;
   proveN(recursiveCycles: number): Promise<RecordedN1ProofResult | RecordedStableN1ProofResult>;
@@ -144,6 +155,11 @@ type RecordedCompiledCircuit = {
 };
 
 type MinaRuntimeCompiled = { client: MinaRuntimeClient; circuitId: number };
+type MinaRuntimeBaseHandle = {
+  kind: 'mina-runtime';
+  client: MinaRuntimeClient;
+  proofId: number;
+};
 let minaRuntimeClientPromise: Promise<MinaRuntimeClient> | undefined;
 
 async function minaRuntimeClient() {
@@ -478,8 +494,26 @@ async function proveRecordedBaseCaseCompiled(
 }
 
 async function proveRecordedBaseCaseKeepCompiled(
-  compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'>
+  compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'> & {
+    minaRuntime?: MinaRuntimeCompiled;
+  }
 ): Promise<RecordedBaseProofHandle> {
+  if (getProofSystemBackend() === 'rust') {
+    let client = compiled.minaRuntime?.client ?? (await minaRuntimeClient());
+    let temporary = compiled.minaRuntime === undefined;
+    let circuitId =
+      compiled.minaRuntime?.circuitId ?? client.compileCircuit(compiled.circuit).circuitId;
+    try {
+      let { proofId, appState, proof } = await client.proveCircuitKeep(circuitId, compiled.witness);
+      return {
+        appState,
+        proof,
+        handle: { kind: 'mina-runtime', client, proofId },
+      };
+    } finally {
+      if (temporary) client.dropCircuit(circuitId);
+    }
+  }
   let native = await nativePickles();
   if (
     !native.rust_pickles_prove_recorded_base_keep ||
@@ -493,6 +527,49 @@ async function proveRecordedBaseCaseKeepCompiled(
   );
   let envelope = JSON.parse(native.rust_pickles_recorded_base_envelope(handle));
   return { handle, ...envelope };
+}
+
+async function proveRecordedN1OverCompiled(
+  previous: RecordedBaseProofHandle,
+  compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'> & {
+    minaRuntime?: MinaRuntimeCompiled;
+  }
+): Promise<RecordedN1ProofResult> {
+  if (isMinaRuntimeBaseHandle(previous.handle)) {
+    let { client, proofId } = previous.handle;
+    let temporary = compiled.minaRuntime === undefined;
+    let circuitId =
+      compiled.minaRuntime?.circuitId ?? client.compileCircuit(compiled.circuit).circuitId;
+    try {
+      return await client.proveCircuitN1Over(circuitId, proofId, compiled.witness);
+    } finally {
+      if (temporary) client.dropCircuit(circuitId);
+    }
+  }
+  let native = await nativePickles();
+  if (!native.rust_pickles_prove_recorded_n1_over) {
+    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1_over — rebuild it.');
+  }
+  return JSON.parse(
+    native.rust_pickles_prove_recorded_n1_over(
+      previous.handle,
+      circuitJsonOf(compiled),
+      compiled.witness
+    )
+  );
+}
+
+function isMinaRuntimeBaseHandle(value: unknown): value is MinaRuntimeBaseHandle {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as MinaRuntimeBaseHandle).kind === 'mina-runtime'
+  );
+}
+
+function releaseRecordedBaseProofHandle(previous: RecordedBaseProofHandle) {
+  if (!isMinaRuntimeBaseHandle(previous.handle)) return;
+  previous.handle.client.dropProof(previous.handle.proofId);
 }
 
 async function proveRecordedN1Compiled(
@@ -582,6 +659,10 @@ async function compileRecorded(
     proveBaseCase: () => proveRecordedBaseCaseCompiled(compiled),
     proveBaseCaseWithWitness: (witness) => proveRecordedBaseCaseCompiled({ ...compiled, witness }),
     proveBaseCaseKeep: () => proveRecordedBaseCaseKeepCompiled(compiled),
+    proveBaseCaseKeepWithWitness: (witness) =>
+      proveRecordedBaseCaseKeepCompiled({ ...compiled, witness }),
+    proveN1OverWithWitness: (previous, witness) =>
+      proveRecordedN1OverCompiled(previous, { ...compiled, witness }),
     proveN1: () => proveRecordedN1Compiled(compiled),
     proveStableN1: (additionalStableCycles = 0) =>
       proveRecordedStableN1Compiled(compiled, additionalStableCycles),
@@ -629,14 +710,8 @@ async function proveRecordedN1Over(
   previous: RecordedBaseProofHandle,
   f: () => Field[] | Promise<Field[]>
 ): Promise<RecordedN1ProofResult> {
-  let native = await nativePickles();
-  if (!native.rust_pickles_prove_recorded_n1_over) {
-    throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1_over — rebuild it.');
-  }
   let { circuit, witness } = await recordCircuit(f);
-  return JSON.parse(
-    native.rust_pickles_prove_recorded_n1_over(previous.handle, JSON.stringify(circuit), witness)
-  );
+  return proveRecordedN1OverCompiled(previous, { circuit, witness });
 }
 
 /** Records `f` and proves it plus one recursive (N1) Pickles cycle. */
@@ -706,6 +781,18 @@ async function verifyRecordedBaseCaseViaMinaRuntime(result: RecordedProofResult)
     await minaRuntimeClient()
   ).verifyProof(result.appState, result.proof as RustProofResponse['proof']);
   return verified.valid;
+}
+
+async function verifyRecordedProofViaMinaRuntime(
+  result: RecordedProofResult | RecordedN1ProofResult
+): Promise<boolean> {
+  if ('challengePolynomialCommitment' in result) {
+    let verified = await (
+      await minaRuntimeClient()
+    ).verifyRecursiveProof(result as RecursiveProofResponse);
+    return verified.valid;
+  }
+  return verifyRecordedBaseCaseViaMinaRuntime(result);
 }
 
 /** Verifies an N2 recorded proof standalone, binding both recursion messages. */
