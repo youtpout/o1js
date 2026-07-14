@@ -163,7 +163,9 @@ async function verify(
     return verifyRecordedProofViaMinaRuntime(
       rustProof.recursion === undefined
         ? (rustProof as RecordedProofResult)
-        : ({ ...rustProof, ...rustProof.recursion } as RecordedN1ProofResult)
+        : rustProof.recursion.kind === 'n1'
+          ? ({ ...rustProof, ...rustProof.recursion } as RecordedN1ProofResult)
+          : ({ ...rustProof, ...rustProof.recursion } as RecordedN2ProofResult)
     );
   }
   await initializeBindings();
@@ -515,13 +517,6 @@ function ZkProgram<
       maxProofsVerified = computeMaxProofsVerified(proofs.map((p) => p.length));
 
       if (getProofSystemBackend() === 'rust') {
-        if (maxProofsVerified === 2) {
-          throw Error(
-            'mina-runtime currently supports regular N0 and one-step N1 ZkPrograms. ' +
-              'N2 programs remain available through experimentalRustPickles until the ' +
-              'width-2 runtime contract is implemented.'
-          );
-        }
         releaseRustProofResources();
         for (let compiled of rustCompiledMethods.values()) compiled.dispose();
         rustCompiledMethods.clear();
@@ -645,12 +640,12 @@ function ZkProgram<
             );
           }
           let previousProofs = suppliedProofs;
-          if (previousProofs.length > 1) {
-            throw Error('mina-runtime regular N2 proving is not implemented yet.');
+          if (previousProofs.length > 2) {
+            throw Error('mina-runtime supports at most two previous proofs.');
           }
-          let result: RecordedProofResult | RecordedN1ProofResult;
+          let result: RecordedProofResult | RecordedN1ProofResult | RecordedN2ProofResult;
           let retained: RecordedProofHandle | undefined;
-          if (previousProofs.length === 0 && maxProofsVerified === 1) {
+          if (previousProofs.length === 0 && (maxProofsVerified ?? 0) > 0) {
             retained = await rustCompiled.proveBaseCaseKeepWithWitness(recorded.witness);
             result = { appState: retained.appState, proof: retained.proof };
           } else if (previousProofs.length === 1) {
@@ -666,6 +661,18 @@ function ZkProgram<
               recorded.witness
             );
             result = retained;
+          } else if (previousProofs.length === 2) {
+            let resources = previousProofs.map((proof) => getRustPicklesProofResource(proof));
+            if (resources.some((resource) => resource?.kind !== 'proof')) {
+              throw Error(
+                'mina-runtime cannot prove N2: both previous proofs must be retained in this process.'
+              );
+            }
+            result = await rustCompiled.proveN2OverWithWitness(
+              resources[0]!.value as RecordedBaseProofHandle,
+              resources[1]!.value as RecordedBaseProofHandle,
+              recorded.witness
+            );
           } else {
             result = await rustCompiled.proveBaseCaseWithWitness(recorded.witness);
           }
@@ -678,16 +685,25 @@ function ZkProgram<
           attachRustPicklesProof(proof, {
             appState: result.appState,
             proof: result.proof as any,
-            ...('challengePolynomialCommitment' in result
+            ...('challengePolynomialCommitments' in result
               ? {
                   recursion: {
-                    kind: 'n1' as const,
-                    challengePolynomialCommitment: result.challengePolynomialCommitment,
+                    kind: 'n2' as const,
+                    challengePolynomialCommitments: result.challengePolynomialCommitments,
                     oldBulletproofChallenges: result.oldBulletproofChallenges,
                     dlogPlonkIndex: result.dlogPlonkIndex,
                   },
                 }
-              : {}),
+              : 'challengePolynomialCommitment' in result
+                ? {
+                    recursion: {
+                      kind: 'n1' as const,
+                      challengePolynomialCommitment: result.challengePolynomialCommitment,
+                      oldBulletproofChallenges: result.oldBulletproofChallenges,
+                      dlogPlonkIndex: result.dlogPlonkIndex,
+                    },
+                  }
+                : {}),
           });
           if (retained !== undefined) {
             let resource = {
@@ -907,14 +923,21 @@ function ZkProgram<
         ? verifyRecordedProofViaMinaRuntime(
             rustProof.recursion === undefined
               ? (rustProof as RecordedProofResult)
-              : ({ ...rustProof, ...rustProof.recursion } as RecordedN1ProofResult)
+              : rustProof.recursion.kind === 'n1'
+                ? ({ ...rustProof, ...rustProof.recursion } as RecordedN1ProofResult)
+                : ({ ...rustProof, ...rustProof.recursion } as RecordedN2ProofResult)
           )
         : rustProof.recursion === undefined
           ? verifyRecordedBaseCase(rustProof as RecordedProofResult)
-          : verifyRecordedN1({
-              ...rustProof,
-              ...rustProof.recursion,
-            });
+          : rustProof.recursion.kind === 'n1'
+            ? verifyRecordedN1({
+                ...rustProof,
+                ...rustProof.recursion,
+              })
+            : verifyRecordedN2({
+                ...rustProof,
+                ...rustProof.recursion,
+              });
     }
     if (compileOutput?.verify === undefined) {
       throw Error(

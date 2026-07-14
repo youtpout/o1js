@@ -337,4 +337,36 @@ state is bound by the statement being produced. Keep both roles explicit.
 `src/lib/proof-system/rust-pickles-recorded.ts`,
 `src/lib/mina-runtime/backend.ts`, `src/tests/mina-runtime-zkprogram-n1.ts`
 
+---
+
+date: 2026-07-14 agent: codex session: mina-runtime-regular-n2 category:
+architecture severity: high tags: [mina-runtime, pickles, n2, zkprogram]
+
+---
+
+### Width-2 proving must execute the new application, not trust its app state
+
+**Context:** Routing regular methods with two `SelfProof` inputs through the
+Rust backend.
+
+**What happened:** The existing low-level recorded N2 helper generated and
+verified a width-2 proof, but accepted the new public application state from the
+host. That was sufficient for structural recursion tests and insufficient for a
+regular `ZkProgram` method because its new constraints were not in the step.
+
+**Resolution/Workaround:** The width-2 recursive circuit now accepts the same
+embedded application closure as N1 and proves that its output matches the state
+hashed into the statement. mina-runtime atomically borrows two retained base
+handles, returns plural recursion metadata, and uses the existing recursive
+verifier. o1js routes two supplied proofs to this operation and serializes the
+result with an explicit `n2` tag.
+
+**Key takeaway:** Binding host-provided public fields is not a substitute for
+executing the method circuit. Every regular recursive branch must embed the new
+application constraints in the step that consumes the prior proofs.
+
+**Relevant files:** `src/lib/proof-system/zkprogram.ts`,
+`src/lib/proof-system/rust-pickles-recorded.ts`,
+`src/lib/mina-runtime/backend.ts`, `src/tests/mina-runtime-zkprogram-n2.ts`
+
 <!-- END LOG -->

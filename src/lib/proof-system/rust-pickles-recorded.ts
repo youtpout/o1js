@@ -19,6 +19,7 @@ import { flattenFieldVar } from '../../native/snarky.js';
 import { getProofSystemBackend } from '../backend.js';
 import {
   MinaRuntimeClient,
+  type RecursiveN2ProofResponse,
   type RecursiveProofResponse,
   type RustProofResponse,
 } from '../mina-runtime/backend.js';
@@ -152,6 +153,11 @@ type RecordedCompiledCircuit = {
     previous: RecordedProofHandle,
     witness: string[]
   ): Promise<RecordedN1ProofHandle>;
+  proveN2OverWithWitness(
+    first: RecordedBaseProofHandle,
+    second: RecordedBaseProofHandle,
+    witness: string[]
+  ): Promise<RecordedN2ProofResult>;
   proveN1(): Promise<RecordedN1ProofResult>;
   proveStableN1(additionalStableCycles?: number): Promise<RecordedStableN1ProofResult>;
   proveN(recursiveCycles: number): Promise<RecordedN1ProofResult | RecordedStableN1ProofResult>;
@@ -168,6 +174,7 @@ type RecordedCompiledCircuit = {
 type MinaRuntimeCompiled = { client: MinaRuntimeClient; circuitId: number };
 type MinaRuntimeBaseHandle = {
   kind: 'mina-runtime';
+  proofKind: 'base' | 'n1';
   client: MinaRuntimeClient;
   proofId: number;
 };
@@ -519,7 +526,7 @@ async function proveRecordedBaseCaseKeepCompiled(
       return {
         appState,
         proof,
-        handle: { kind: 'mina-runtime', client, proofId },
+        handle: { kind: 'mina-runtime', proofKind: 'base', client, proofId },
       };
     } finally {
       if (temporary) client.dropCircuit(circuitId);
@@ -591,8 +598,42 @@ async function proveRecordedN1OverKeepCompiled(
     );
     return {
       ...result,
-      handle: { kind: 'mina-runtime', client, proofId: nextProofId },
+      handle: { kind: 'mina-runtime', proofKind: 'n1', client, proofId: nextProofId },
     };
+  } finally {
+    if (temporary) client.dropCircuit(circuitId);
+  }
+}
+
+async function proveRecordedN2OverCompiled(
+  first: RecordedBaseProofHandle,
+  second: RecordedBaseProofHandle,
+  compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'> & {
+    minaRuntime?: MinaRuntimeCompiled;
+  }
+): Promise<RecordedN2ProofResult> {
+  if (
+    !isMinaRuntimeBaseHandle(first.handle) ||
+    !isMinaRuntimeBaseHandle(second.handle) ||
+    first.handle.proofKind !== 'base' ||
+    second.handle.proofKind !== 'base'
+  ) {
+    throw Error('regular N2 currently requires two retained base proofs');
+  }
+  let client = first.handle.client;
+  if (second.handle.client !== client) {
+    throw Error('regular N2 proof handles must belong to the same mina-runtime instance');
+  }
+  let temporary = compiled.minaRuntime === undefined;
+  let circuitId =
+    compiled.minaRuntime?.circuitId ?? client.compileCircuit(compiled.circuit).circuitId;
+  try {
+    return await client.proveCircuitN2Over(
+      circuitId,
+      first.handle.proofId,
+      second.handle.proofId,
+      compiled.witness
+    );
   } finally {
     if (temporary) client.dropCircuit(circuitId);
   }
@@ -704,6 +745,8 @@ async function compileRecorded(
       proveRecordedN1OverCompiled(previous, { ...compiled, witness }),
     proveN1OverKeepWithWitness: (previous, witness) =>
       proveRecordedN1OverKeepCompiled(previous, { ...compiled, witness }),
+    proveN2OverWithWitness: (first, second, witness) =>
+      proveRecordedN2OverCompiled(first, second, { ...compiled, witness }),
     proveN1: () => proveRecordedN1Compiled(compiled),
     proveStableN1: (additionalStableCycles = 0) =>
       proveRecordedStableN1Compiled(compiled, additionalStableCycles),
@@ -825,8 +868,14 @@ async function verifyRecordedBaseCaseViaMinaRuntime(result: RecordedProofResult)
 }
 
 async function verifyRecordedProofViaMinaRuntime(
-  result: RecordedProofResult | RecordedN1ProofResult
+  result: RecordedProofResult | RecordedN1ProofResult | RecordedN2ProofResult
 ): Promise<boolean> {
+  if ('challengePolynomialCommitments' in result) {
+    let verified = await (
+      await minaRuntimeClient()
+    ).verifyRecursiveProof(result as RecursiveN2ProofResponse);
+    return verified.valid;
+  }
   if ('challengePolynomialCommitment' in result) {
     let verified = await (
       await minaRuntimeClient()

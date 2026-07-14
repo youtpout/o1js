@@ -25,10 +25,19 @@ type RustPicklesProofPayload = {
   recursion?: RustPicklesRecursion;
 };
 
-type RustPicklesRecursion = {
+type RustPicklesRecursion = RustPicklesRecursionN1 | RustPicklesRecursionN2;
+
+type RustPicklesRecursionN1 = {
   kind: 'n1';
   challengePolynomialCommitment: [string, string];
   oldBulletproofChallenges: string[];
+  dlogPlonkIndex: [string, string][];
+};
+
+type RustPicklesRecursionN2 = {
+  kind: 'n2';
+  challengePolynomialCommitments: [string, string][];
+  oldBulletproofChallenges: string[][];
   dlogPlonkIndex: [string, string][];
 };
 
@@ -92,21 +101,45 @@ function parseRecursion(value: unknown): RustPicklesRecursion | undefined {
   if (typeof value !== 'object' || value === null) {
     throw Error('Invalid mina-runtime Pickles recursion metadata');
   }
-  let recursion = value as Partial<RustPicklesRecursion>;
+  let recursion = value as Record<string, unknown>;
+  if (recursion.kind === 'n2') {
+    let commitments = recursion.challengePolynomialCommitments;
+    let challenges = recursion.oldBulletproofChallenges;
+    let index = recursion.dlogPlonkIndex;
+    if (
+      !Array.isArray(commitments) ||
+      !commitments.every(isPoint) ||
+      !Array.isArray(challenges) ||
+      !challenges.every(isFields) ||
+      !Array.isArray(index) ||
+      !index.every(isPoint)
+    ) {
+      throw Error('Invalid mina-runtime Pickles N2 metadata');
+    }
+    return {
+      kind: 'n2',
+      challengePolynomialCommitments: commitments.map((point) => [...point]),
+      oldBulletproofChallenges: challenges.map((fields) => [...fields]),
+      dlogPlonkIndex: index.map((point) => [...point]),
+    };
+  }
+  let commitment = recursion.challengePolynomialCommitment;
+  let challenges = recursion.oldBulletproofChallenges;
+  let index = recursion.dlogPlonkIndex;
   if (
     recursion.kind !== 'n1' ||
-    !isPoint(recursion.challengePolynomialCommitment) ||
-    !isFields(recursion.oldBulletproofChallenges) ||
-    !Array.isArray(recursion.dlogPlonkIndex) ||
-    !recursion.dlogPlonkIndex.every(isPoint)
+    !isPoint(commitment) ||
+    !isFields(challenges) ||
+    !Array.isArray(index) ||
+    !index.every(isPoint)
   ) {
     throw Error('Invalid mina-runtime Pickles N1 metadata');
   }
   return {
     kind: 'n1',
-    challengePolynomialCommitment: [...recursion.challengePolynomialCommitment],
-    oldBulletproofChallenges: [...recursion.oldBulletproofChallenges],
-    dlogPlonkIndex: recursion.dlogPlonkIndex.map((point) => [...point]),
+    challengePolynomialCommitment: [...commitment],
+    oldBulletproofChallenges: [...challenges],
+    dlogPlonkIndex: index.map((point) => [...point]),
   };
 }
 

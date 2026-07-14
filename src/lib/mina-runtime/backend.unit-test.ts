@@ -99,10 +99,22 @@ describe('MinaRuntimeClient', () => {
       oldBulletproofChallenges: ['6'],
       dlogPlonkIndex: [['7', '8']] as [string, string][],
     };
+    let recursiveN2 = {
+      appState: ['9'],
+      proof,
+      challengePolynomialCommitments: [
+        ['10', '11'],
+        ['12', '13'],
+      ] as [string, string][],
+      oldBulletproofChallenges: [['14'], ['15']],
+      dlogPlonkIndex: [['16', '17']] as [string, string][],
+    };
 
     await client.proveCircuitKeep(2, ['3']);
     await client.proveCircuitN1Over(4, 9, ['5']);
+    await client.proveCircuitN2Over(6, 9, 10, ['7']);
     await client.verifyRecursiveProof(recursive);
+    await client.verifyRecursiveProof(recursiveN2);
     client.dropProof(9);
 
     expect(seen).toEqual([
@@ -112,6 +124,10 @@ describe('MinaRuntimeClient', () => {
         input: { circuitId: 4, previousProofId: 9, witness: ['5'] },
       },
       {
+        operation: 'proveCircuitN2Over',
+        input: { circuitId: 6, firstProofId: 9, secondProofId: 10, witness: ['7'] },
+      },
+      {
         operation: 'verifyRecursiveProof',
         input: {
           appState: ['3'],
@@ -119,6 +135,19 @@ describe('MinaRuntimeClient', () => {
           challengePolynomialCommitments: [['4', '5']],
           oldBulletproofChallenges: [['6']],
           dlogPlonkIndex: [['7', '8']],
+        },
+      },
+      {
+        operation: 'verifyRecursiveProof',
+        input: {
+          appState: ['9'],
+          proof,
+          challengePolynomialCommitments: [
+            ['10', '11'],
+            ['12', '13'],
+          ],
+          oldBulletproofChallenges: [['14'], ['15']],
+          dlogPlonkIndex: [['16', '17']],
         },
       },
       { operation: 'dropProof', input: { proof_id: 9 } },

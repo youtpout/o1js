@@ -7,6 +7,7 @@ export {
   type KeptProofResponse,
   type MinaRuntimeTransport,
   type RecordedCircuit,
+  type RecursiveN2ProofResponse,
   type RecursiveProofResponse,
   type RustProofResponse,
 };
@@ -48,6 +49,12 @@ type RecursiveProofResponse = RustProofResponse & {
   proofId: number;
   challengePolynomialCommitment: [string, string];
   oldBulletproofChallenges: string[];
+  dlogPlonkIndex: [string, string][];
+};
+
+type RecursiveN2ProofResponse = RustProofResponse & {
+  challengePolynomialCommitments: [string, string][];
+  oldBulletproofChallenges: string[][];
   dlogPlonkIndex: [string, string][];
 };
 
@@ -106,6 +113,20 @@ class MinaRuntimeClient {
     );
   }
 
+  proveCircuitN2Over(
+    circuitId: number,
+    firstProofId: number,
+    secondProofId: number,
+    witness: string[],
+    signal?: AbortSignal
+  ) {
+    return this.#executeAsync<RecursiveN2ProofResponse>(
+      'proveCircuitN2Over',
+      { circuitId, firstProofId, secondProofId, witness },
+      signal
+    );
+  }
+
   verifyProof(appState: string[], proof: RustPicklesJsonProof, signal?: AbortSignal) {
     return this.#executeAsync<{ valid: boolean; reason?: string }>(
       'verifyProof',
@@ -114,14 +135,23 @@ class MinaRuntimeClient {
     );
   }
 
-  verifyRecursiveProof(result: RecursiveProofResponse, signal?: AbortSignal) {
+  verifyRecursiveProof(
+    result: RecursiveProofResponse | RecursiveN2ProofResponse,
+    signal?: AbortSignal
+  ) {
     return this.#executeAsync<{ valid: boolean; reason?: string }>(
       'verifyRecursiveProof',
       {
         appState: result.appState,
         proof: result.proof,
-        challengePolynomialCommitments: [result.challengePolynomialCommitment],
-        oldBulletproofChallenges: [result.oldBulletproofChallenges],
+        challengePolynomialCommitments:
+          'challengePolynomialCommitment' in result
+            ? [result.challengePolynomialCommitment]
+            : result.challengePolynomialCommitments,
+        oldBulletproofChallenges:
+          'challengePolynomialCommitment' in result
+            ? [result.oldBulletproofChallenges]
+            : result.oldBulletproofChallenges,
         dlogPlonkIndex: result.dlogPlonkIndex,
       },
       signal
