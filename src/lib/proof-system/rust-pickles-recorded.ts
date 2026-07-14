@@ -448,19 +448,34 @@ async function recordCircuit(
 
 type RustPicklesBindings = {
   rust_pickles_compile_recorded_base?: (circuit: string, witness: string[]) => unknown;
+  rust_pickles_compile_recorded_base_bytes?: (circuit: string, witness: Uint8Array) => unknown;
   rust_pickles_prove_recorded_base_keep_compiled?: (
     compiled: unknown,
     witness: string[]
+  ) => unknown;
+  rust_pickles_prove_recorded_base_keep_compiled_bytes?: (
+    compiled: unknown,
+    witness: Uint8Array
   ) => unknown;
   rust_pickles_compile_recorded_n1?: (
     previous: unknown,
     circuit: string,
     witness: string[]
   ) => unknown;
+  rust_pickles_compile_recorded_n1_bytes?: (
+    previous: unknown,
+    circuit: string,
+    witness: Uint8Array
+  ) => unknown;
   rust_pickles_prove_recorded_n1_compiled?: (
     compiled: unknown,
     previous: unknown,
     witness: string[]
+  ) => string;
+  rust_pickles_prove_recorded_n1_compiled_bytes?: (
+    compiled: unknown,
+    previous: unknown,
+    witness: Uint8Array
   ) => string;
   rust_pickles_prove_recorded_base?: (circuit: string, witness: string[]) => string;
   rust_pickles_prove_recorded_base_keep?: (circuit: string, witness: string[]) => unknown;
@@ -571,6 +586,20 @@ function appStateToDecimal(appState: Field[] | string[]): string[] {
   return appState.map((field) => (typeof field === 'string' ? field : field.toString()));
 }
 
+function fpWitnessToBytes(witness: string[]): Uint8Array {
+  let bytes = new Uint8Array(32 * witness.length);
+  for (let i = 0; i < witness.length; i++) {
+    let value = BigInt(witness[i]);
+    if (value < 0n) throw Error('Rust Pickles witness must be a canonical non-negative Fp');
+    for (let j = 0; j < 32; j++) {
+      bytes[32 * i + j] = Number(value & 0xffn);
+      value >>= 8n;
+    }
+    if (value !== 0n) throw Error('Rust Pickles witness does not fit in 32 bytes');
+  }
+  return bytes;
+}
+
 async function proveRecordedBaseCaseCompiled(
   compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'> & {
     minaRuntime?: MinaRuntimeCompiled;
@@ -597,7 +626,12 @@ async function proveRecordedBaseCaseCompiled(
       throw Error('Rust Pickles bindings do not expose compiled base proving.');
     }
     let proofHandle = await runRustPickles(() =>
-      bindings.rust_pickles_prove_recorded_base_keep_compiled!(handle, compiled.witness)
+      bindings.rust_pickles_prove_recorded_base_keep_compiled_bytes
+        ? bindings.rust_pickles_prove_recorded_base_keep_compiled_bytes(
+            handle,
+            fpWitnessToBytes(compiled.witness)
+          )
+        : bindings.rust_pickles_prove_recorded_base_keep_compiled!(handle, compiled.witness)
     );
     return JSON.parse(bindings.rust_pickles_recorded_base_envelope(proofHandle));
   }
@@ -643,7 +677,12 @@ async function proveRecordedBaseCaseKeepCompiled(
       throw Error('Rust Pickles bindings do not expose compiled base proving.');
     }
     let proofHandle = await runRustPickles(() =>
-      bindings.rust_pickles_prove_recorded_base_keep_compiled!(handle, compiled.witness)
+      bindings.rust_pickles_prove_recorded_base_keep_compiled_bytes
+        ? bindings.rust_pickles_prove_recorded_base_keep_compiled_bytes(
+            handle,
+            fpWitnessToBytes(compiled.witness)
+          )
+        : bindings.rust_pickles_prove_recorded_base_keep_compiled!(handle, compiled.witness)
     );
     let envelope = JSON.parse(bindings.rust_pickles_recorded_base_envelope(proofHandle));
     return { handle: proofHandle, ...envelope };
@@ -861,11 +900,14 @@ async function compileRecorded(
     if (!bindings.rust_pickles_compile_recorded_base) {
       throw Error('Rust Pickles bindings do not expose reusable compiled indexes.');
     }
+    let circuitJson = JSON.stringify(recorded.circuit);
     let handle = await runRustPickles(() =>
-      bindings.rust_pickles_compile_recorded_base!(
-        JSON.stringify(recorded.circuit),
-        recorded.witness
-      )
+      bindings.rust_pickles_compile_recorded_base_bytes
+        ? bindings.rust_pickles_compile_recorded_base_bytes(
+            circuitJson,
+            fpWitnessToBytes(recorded.witness)
+          )
+        : bindings.rust_pickles_compile_recorded_base!(circuitJson, recorded.witness)
     );
     directRust = { bindings, handle };
   }
@@ -936,12 +978,15 @@ async function compileRecordedN1Over(
   ) {
     throw Error('Rust Pickles bindings do not expose reusable compiled N1 indexes.');
   }
+  let circuitJson = JSON.stringify(recorded.circuit);
   let handle = await runRustPickles(() =>
-    bindings.rust_pickles_compile_recorded_n1!(
-      previous.handle,
-      JSON.stringify(recorded.circuit),
-      recorded.witness
-    )
+    bindings.rust_pickles_compile_recorded_n1_bytes
+      ? bindings.rust_pickles_compile_recorded_n1_bytes(
+          previous.handle,
+          circuitJson,
+          fpWitnessToBytes(recorded.witness)
+        )
+      : bindings.rust_pickles_compile_recorded_n1!(previous.handle, circuitJson, recorded.witness)
   );
   let compiled: RecordedCompiledN1Circuit = {
     ...recorded,
@@ -949,7 +994,13 @@ async function compileRecordedN1Over(
     async proveWithWitness(witness) {
       return JSON.parse(
         await runRustPickles(() =>
-          bindings.rust_pickles_prove_recorded_n1_compiled!(handle, previous.handle, witness)
+          bindings.rust_pickles_prove_recorded_n1_compiled_bytes
+            ? bindings.rust_pickles_prove_recorded_n1_compiled_bytes(
+                handle,
+                previous.handle,
+                fpWitnessToBytes(witness)
+              )
+            : bindings.rust_pickles_prove_recorded_n1_compiled!(handle, previous.handle, witness)
         )
       );
     },
