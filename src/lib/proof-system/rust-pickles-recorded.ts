@@ -14,9 +14,9 @@
  * EC addition, range checks and lookups. Other gates throw during recording
  * until their recorder is wired up.
  */
-import { Snarky, initializeBindings } from '../../bindings.js';
+import { Snarky, initializeBindings, wasm } from '../../bindings.js';
 import { flattenFieldVar } from '../../native/snarky.js';
-import { getProofSystemBackend } from '../backend.js';
+import { getBackendPreference, getProofSystemBackend } from '../backend.js';
 import {
   MinaRuntimeClient,
   type RecursiveN2ProofResponse,
@@ -431,7 +431,7 @@ async function recordCircuit(
   }
 }
 
-type NativePickles = {
+type RustPicklesBindings = {
   rust_pickles_prove_recorded_base?: (circuit: string, witness: string[]) => string;
   rust_pickles_prove_recorded_base_keep?: (circuit: string, witness: string[]) => unknown;
   rust_pickles_recorded_base_envelope?: (handle: unknown) => string;
@@ -467,7 +467,57 @@ type NativePickles = {
   ) => boolean;
 };
 
-async function nativePickles(): Promise<NativePickles> {
+type WasmRustPicklesBindings = Omit<
+  RustPicklesBindings,
+  'rust_pickles_verify_side_loaded' | 'rust_pickles_verify_side_loaded_with_step_vk'
+> & {
+  rust_pickles_verify_side_loaded?: (
+    appState: string[],
+    commitmentsJson: string,
+    challengesJson: string,
+    proof: string
+  ) => boolean;
+  rust_pickles_verify_side_loaded_with_step_vk?: (
+    appState: string[],
+    dlogPlonkIndexJson: string,
+    commitmentsJson: string,
+    challengesJson: string,
+    proof: string
+  ) => boolean;
+};
+
+async function rustPicklesBindings(): Promise<RustPicklesBindings> {
+  if (getBackendPreference() === 'wasm') {
+    await initializeBindings();
+    let rustWasm = wasm as unknown as WasmRustPicklesBindings;
+    if (typeof rustWasm.rust_pickles_prove_recorded_base !== 'function') {
+      throw Error(
+        'Rust Pickles WASM backend is not available: rebuild kimchi-wasm from ' +
+          'proof-systems/pickle-rs and install the generated Node WASM artifacts.'
+      );
+    }
+    let verify = rustWasm.rust_pickles_verify_side_loaded;
+    let verifyWithStepVk = rustWasm.rust_pickles_verify_side_loaded_with_step_vk;
+    return {
+      ...rustWasm,
+      rust_pickles_verify_side_loaded:
+        verify === undefined
+          ? undefined
+          : (appState, commitments, challenges, proof) =>
+              verify(appState, JSON.stringify(commitments), JSON.stringify(challenges), proof),
+      rust_pickles_verify_side_loaded_with_step_vk:
+        verifyWithStepVk === undefined
+          ? undefined
+          : (appState, dlogPlonkIndex, commitments, challenges, proof) =>
+              verifyWithStepVk(
+                appState,
+                JSON.stringify(dlogPlonkIndex),
+                JSON.stringify(commitments),
+                JSON.stringify(challenges),
+                proof
+              ),
+    };
+  }
   let { default: native } = await import('../../native/native.js');
   if (!native) {
     throw Error(
@@ -475,7 +525,7 @@ async function nativePickles(): Promise<NativePickles> {
         '(PROOF_SYSTEMS_ROOT=... npm run build:native).'
     );
   }
-  return native as NativePickles;
+  return native as RustPicklesBindings;
 }
 
 function circuitJsonOf(compiled: Pick<RecordedCompiledCircuit, 'circuit'>): string {
@@ -502,7 +552,7 @@ async function proveRecordedBaseCaseCompiled(
       if (temporary) client.dropCircuit(circuitId);
     }
   }
-  let native = await nativePickles();
+  let native = await rustPicklesBindings();
   if (!native.rust_pickles_prove_recorded_base) {
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_base — rebuild it.');
   }
@@ -532,7 +582,7 @@ async function proveRecordedBaseCaseKeepCompiled(
       if (temporary) client.dropCircuit(circuitId);
     }
   }
-  let native = await nativePickles();
+  let native = await rustPicklesBindings();
   if (
     !native.rust_pickles_prove_recorded_base_keep ||
     !native.rust_pickles_recorded_base_envelope
@@ -564,7 +614,7 @@ async function proveRecordedN1OverCompiled(
       if (temporary) client.dropCircuit(circuitId);
     }
   }
-  let native = await nativePickles();
+  let native = await rustPicklesBindings();
   if (!native.rust_pickles_prove_recorded_n1_over) {
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1_over — rebuild it.');
   }
@@ -655,7 +705,7 @@ function releaseRecordedBaseProofHandle(previous: RecordedProofHandle) {
 async function proveRecordedN1Compiled(
   compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'>
 ): Promise<RecordedN1ProofResult> {
-  let native = await nativePickles();
+  let native = await rustPicklesBindings();
   if (!native.rust_pickles_prove_recorded_n1) {
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1 — rebuild it.');
   }
@@ -671,7 +721,7 @@ async function proveRecordedStableN1Compiled(
   if (!Number.isInteger(additionalStableCycles) || additionalStableCycles < 0) {
     throw Error('additionalStableCycles must be a non-negative integer');
   }
-  let native = await nativePickles();
+  let native = await rustPicklesBindings();
   if (!native.rust_pickles_prove_recorded_stable_n1) {
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_stable_n1 — rebuild it.');
   }
@@ -700,7 +750,7 @@ async function proveRecordedN2Compiled(
   second: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'>,
   appState: Field[] | string[]
 ): Promise<RecordedN2ProofResult> {
-  let native = await nativePickles();
+  let native = await rustPicklesBindings();
   if (!native.rust_pickles_prove_recorded_n2) {
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n2 — rebuild it.');
   }
@@ -848,7 +898,7 @@ async function verifyRecordedBaseCase(result: RecordedProofResult): Promise<bool
   if (getProofSystemBackend() === 'rust') {
     return verifyRecordedBaseCaseViaMinaRuntime(result);
   }
-  let native = await nativePickles();
+  let native = await rustPicklesBindings();
   if (!native.rust_pickles_verify_side_loaded) {
     throw Error('@o1js/native does not expose rust_pickles_verify_side_loaded — rebuild it.');
   }
@@ -887,7 +937,7 @@ async function verifyRecordedProofViaMinaRuntime(
 
 /** Verifies an N2 recorded proof standalone, binding both recursion messages. */
 async function verifyRecordedN2(result: RecordedN2ProofResult): Promise<boolean> {
-  let native = await nativePickles();
+  let native = await rustPicklesBindings();
   if (!native.rust_pickles_verify_side_loaded_with_step_vk) {
     throw Error(
       '@o1js/native does not expose rust_pickles_verify_side_loaded_with_step_vk — rebuild it.'
@@ -904,7 +954,7 @@ async function verifyRecordedN2(result: RecordedN2ProofResult): Promise<boolean>
 
 /** Verifies an N1 recorded proof standalone, binding its recursion messages. */
 async function verifyRecordedN1(result: RecordedN1ProofResult): Promise<boolean> {
-  let native = await nativePickles();
+  let native = await rustPicklesBindings();
   if (!native.rust_pickles_verify_side_loaded_with_step_vk) {
     throw Error(
       '@o1js/native does not expose rust_pickles_verify_side_loaded_with_step_vk — rebuild it.'

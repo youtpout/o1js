@@ -282,9 +282,9 @@ zkprogram]
 **What happened:** A base proof serialized enough data for standalone
 verification, but Pickles N1 proving needs the full `RecordedBaseHandle`. The
 first regular call also lost that live handle because `Provable.fromValue()`
-reconstructed the `SelfProof`; its public fields survived while its process-local
-WeakMap resource did not. The first N1 verification attempt also treated nested
-recursion metadata as a base proof.
+reconstructed the `SelfProof`; its public fields survived while its
+process-local WeakMap resource did not. The first N1 verification attempt also
+treated nested recursion metadata as a base proof.
 
 **Resolution/Workaround:** mina-runtime now owns retained base proofs behind
 opaque IDs and exposes keep, N1-over, recursive verify, and drop operations.
@@ -302,8 +302,7 @@ it explicitly until a canonical import/export format exists.
 **Relevant files:** `src/lib/mina-runtime/backend.ts`,
 `src/lib/proof-system/rust-pickles.ts`,
 `src/lib/proof-system/rust-pickles-recorded.ts`,
-`src/lib/proof-system/zkprogram.ts`,
-`src/tests/mina-runtime-zkprogram-n1.ts`
+`src/lib/proof-system/zkprogram.ts`, `src/tests/mina-runtime-zkprogram-n1.ts`
 
 ---
 
@@ -368,5 +367,41 @@ application constraints in the step that consumes the prior proofs.
 **Relevant files:** `src/lib/proof-system/zkprogram.ts`,
 `src/lib/proof-system/rust-pickles-recorded.ts`,
 `src/lib/mina-runtime/backend.ts`, `src/tests/mina-runtime-zkprogram-n2.ts`
+
+---
+
+date: 2026-07-14 agent: codex session: pickles-rust-wasm-benchmark category:
+rust-wasm-boundary severity: high tags: [pickles, wasm, napi, benchmark,
+transport]
+
+---
+
+### The experimental Pickles recorder silently selected N-API under a WASM backend
+
+**Context:** Benchmarking the same recursive ZkProgram through jsoo WASM and
+Pickles Rust WASM.
+
+**What happened:** `setBackend('wasm')` selected Kimchi WASM for ordinary o1js
+operations, but `rust-pickles-recorded.ts` still imported `native/native.js`
+unconditionally. A benchmark labelled Rust WASM therefore measured N-API. The
+WASM standalone-verifier exports also accept recursion vectors as JSON strings,
+while N-API accepts JavaScript arrays.
+
+**Root cause:** The experimental recorder predated the backend selector and its
+local binding type described only the N-API calling convention.
+
+**Resolution/Workaround:** Select the live `wasm` binding after
+`initializeBindings()` when `getBackendPreference()` is `wasm`, keep N-API for
+`native`, and normalize the two WASM verifier calls at the TypeScript boundary.
+The installed o1js WASM artifacts must be built from `proof-systems/pickle-rs`;
+the official Mina artifacts do not contain the experimental Pickles exports.
+
+**Key takeaway:** A WASM benchmark must assert that the Pickles exports exist in
+the selected module; `setBackend('wasm')` alone did not previously prove that
+the recursive prover was running in WASM.
+
+**Relevant files:** `src/lib/proof-system/rust-pickles-recorded.ts`,
+`src/bindings/compiled/node_bindings/kimchi_wasm.cjs`,
+`~/Projects/zkapp-rust/contracts/src/AddZkProgram.bench.ts`
 
 <!-- END LOG -->

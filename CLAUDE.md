@@ -220,8 +220,8 @@ Mina to the official parent of the old experimental `d53310c` submodule commit;
 Rust integration belongs in `mina-rust`/`mina-runtime` instead.
 
 The release report remains red only for real feature/format gaps: canonical
-proof and VK formats, cross-backend verification, recursive continuation from
-N2 results, heterogeneous N2 branches, cross-process continuation, SmartContract
+proof and VK formats, cross-backend verification, recursive continuation from N2
+results, heterogeneous N2 branches, cross-process continuation, SmartContract
 proofs, proving-index cache round trips, and browser runtime integration. jsoo
 remains available as the reference and fallback until these capabilities are
 implemented 1:1.
@@ -231,6 +231,12 @@ implemented 1:1.
 Expose the same compile/prove/verify and IR API from `kimchi-wasm`. Native and
 browser transports must share proof formats and program semantics. Add worker
 support, optional WASM threads, and IndexedDB index caching.
+
+The low-level experimental recorded-circuit path now honors `setBackend('wasm')`
+and uses the Pickles exports from `kimchi-wasm` for base, kept-base, N1, N2, and
+standalone verification. Node base→N1 proving and verification are validated in
+`~/Projects/zkapp-rust`. This is not yet the high-level mina-runtime transport:
+regular `O1JS_PROOF_SYSTEM=rust` programs still require the N-API adapter.
 
 Exit criterion: the browser bundle can compile, prove, verify, serialize, and
 resume recursive chains without loading OCaml-generated JavaScript.
