@@ -33,7 +33,7 @@ type RustPicklesRecursion = {
 };
 
 type RustPicklesProofResource = {
-  kind: 'base';
+  kind: 'proof';
   value: unknown;
   drop(): void;
 };

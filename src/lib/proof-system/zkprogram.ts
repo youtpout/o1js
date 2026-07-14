@@ -57,6 +57,7 @@ import {
   type RecordedCompiledCircuit,
   type RecordedN1ProofResult,
   type RecordedN2ProofResult,
+  type RecordedProofHandle,
   type RecordedProofResult,
 } from './rust-pickles-recorded.js';
 import {
@@ -648,22 +649,23 @@ function ZkProgram<
             throw Error('mina-runtime regular N2 proving is not implemented yet.');
           }
           let result: RecordedProofResult | RecordedN1ProofResult;
-          let kept: RecordedBaseProofHandle | undefined;
+          let retained: RecordedProofHandle | undefined;
           if (previousProofs.length === 0 && maxProofsVerified === 1) {
-            kept = await rustCompiled.proveBaseCaseKeepWithWitness(recorded.witness);
-            result = { appState: kept.appState, proof: kept.proof };
+            retained = await rustCompiled.proveBaseCaseKeepWithWitness(recorded.witness);
+            result = { appState: retained.appState, proof: retained.proof };
           } else if (previousProofs.length === 1) {
             let resource = getRustPicklesProofResource(previousProofs[0]);
-            if (resource?.kind !== 'base') {
+            if (resource?.kind !== 'proof') {
               throw Error(
                 'mina-runtime cannot continue this recursive chain: the previous proof was ' +
-                  'serialized or was not produced as a kept base proof in this process.'
+                  'serialized or was not retained in this process.'
               );
             }
-            result = await rustCompiled.proveN1OverWithWitness(
-              resource.value as RecordedBaseProofHandle,
+            retained = await rustCompiled.proveN1OverKeepWithWitness(
+              resource.value as RecordedProofHandle,
               recorded.witness
             );
+            result = retained;
           } else {
             result = await rustCompiled.proveBaseCaseWithWitness(recorded.witness);
           }
@@ -687,11 +689,11 @@ function ZkProgram<
                 }
               : {}),
           });
-          if (kept !== undefined) {
+          if (retained !== undefined) {
             let resource = {
-              kind: 'base' as const,
-              value: kept,
-              drop: () => releaseRecordedBaseProofHandle(kept),
+              kind: 'proof' as const,
+              value: retained,
+              drop: () => releaseRecordedBaseProofHandle(retained),
             };
             rustProofResources.add(resource);
             attachRustPicklesProofResource(proof, resource);

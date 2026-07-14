@@ -305,4 +305,36 @@ it explicitly until a canonical import/export format exists.
 `src/lib/proof-system/zkprogram.ts`,
 `src/tests/mina-runtime-zkprogram-n1.ts`
 
+---
+
+date: 2026-07-14 agent: codex session: mina-runtime-chained-n1 category:
+architecture severity: high tags: [mina-runtime, pickles, recursion, handles]
+
+---
+
+### A retained recursive proof must distinguish its old and new app states
+
+**Context:** Generalizing the process-local proof handle from base → N1 to an
+arbitrary N1 chain.
+
+**What happened:** The first stable cycle failed even though the new app and VK
+were included in both two-pass builds. The next-step preparation was passing the
+new application state where Pickles needed the previous proof's public state to
+finalize its accumulator digest.
+
+**Resolution/Workaround:** proof-systems now retains either a base proof or the
+complete latest recursive step/wrap cycle. The next-cycle API takes the previous
+and new states separately and shares the embedded application closure across
+both VK-stabilization passes. mina-runtime returns a fresh opaque proof ID for
+every N1 result; o1js attaches that resource to the returned `SelfProof` so it
+can be consumed again and releases all retained IDs on `Program.dispose()`.
+
+**Key takeaway:** Recursive continuation state is not just the latest envelope:
+the previous public state finalizes the consumed proof, while the new public
+state is bound by the statement being produced. Keep both roles explicit.
+
+**Relevant files:** `src/lib/proof-system/zkprogram.ts`,
+`src/lib/proof-system/rust-pickles-recorded.ts`,
+`src/lib/mina-runtime/backend.ts`, `src/tests/mina-runtime-zkprogram-n1.ts`
+
 <!-- END LOG -->

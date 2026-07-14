@@ -92,6 +92,7 @@ describe('MinaRuntimeClient', () => {
       side_loaded_verification_key_base58: '1',
     };
     let recursive = {
+      proofId: 10,
       appState: ['3'],
       proof,
       challengePolynomialCommitment: ['4', '5'] as [string, string],

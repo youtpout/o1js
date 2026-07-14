@@ -179,18 +179,19 @@ The first regular API slice is implemented behind `O1JS_PROOF_SYSTEM=rust` or
 - the platform N-API loader (`O1JS_MINA_RUNTIME_PATH` for local builds);
 - regular N0 `ZkProgram.compile()`, method proving, `Program.verify()` and
   global `verify()`;
-- regular N1 `SelfProof` proving from a retained base proof, including
-  `Program.verify()`, global `verify()`, JSON round trips, and tamper rejection;
+- regular N1 `SelfProof` proving with arbitrarily chained retained proofs,
+  including `Program.verify()`, global `verify()`, JSON round trips, and tamper
+  rejection;
 - public-input and public-output binding in the Rust application statement;
 - `Proof.toJSON()` / `Proof.fromJSON()` round trips with tamper rejection;
 - explicit circuit-resource disposal and reusable runtime circuit handles;
 - a generic runtime operation entry point for Ledger, signed command, and
   encoding operations.
 
-The switch supports one recursive proof input (N1) when the base proof was
-created and retained in the same process. Serialized N1 proofs are independently
-verifiable, but a serialized base proof cannot yet resume a recursive chain
-because the full native base proof has no stable import/export format. N2,
+The switch supports one recursive proof input (N1) at any chain depth when the
+previous proof was retained in the same process. Serialized N1 proofs are
+independently verifiable, but a serialized proof cannot yet resume a recursive
+chain because the full native continuation has no stable import/export format. N2,
 cross-process recursive continuation, and SmartContract prover adaptation remain
 release blockers and must stay visible in the parity gate.
 

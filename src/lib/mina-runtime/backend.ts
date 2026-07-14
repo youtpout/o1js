@@ -45,6 +45,7 @@ type RustProofResponse = {
 type KeptProofResponse = RustProofResponse & { proofId: number };
 
 type RecursiveProofResponse = RustProofResponse & {
+  proofId: number;
   challengePolynomialCommitment: [string, string];
   oldBulletproofChallenges: string[];
   dlogPlonkIndex: [string, string][];

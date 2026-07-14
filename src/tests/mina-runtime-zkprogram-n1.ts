@@ -59,7 +59,12 @@ if (!(await Program.verify(recursive))) {
   throw Error('regular mina-runtime recursive proof was rejected');
 }
 
-let json = recursive.toJSON();
+let { proof: secondRecursive } = await Program.step(Field(8), recursive, Field(3));
+if (!(await Program.verify(secondRecursive))) {
+  throw Error('regular mina-runtime chained recursive proof was rejected');
+}
+
+let json = secondRecursive.toJSON();
 if (!(await verify(json, verificationKey))) {
   throw Error('global verify() rejected a serialized recursive mina-runtime proof');
 }

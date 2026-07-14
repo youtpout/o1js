@@ -47,6 +47,7 @@ export {
   type RecordedCompiledCircuit,
   type RecordedN1ProofResult,
   type RecordedN2ProofResult,
+  type RecordedProofHandle,
   type RecordedProofResult,
   type RecordedStableN1ProofResult,
 };
@@ -130,6 +131,12 @@ type RecordedBaseProofHandle = RecordedProofResult & {
   handle: MinaRuntimeBaseHandle | unknown;
 };
 
+type RecordedN1ProofHandle = RecordedN1ProofResult & {
+  handle: MinaRuntimeBaseHandle;
+};
+
+type RecordedProofHandle = RecordedBaseProofHandle | RecordedN1ProofHandle;
+
 type RecordedCompiledCircuit = {
   circuit: RecordedCircuitJson;
   witness: string[];
@@ -138,9 +145,13 @@ type RecordedCompiledCircuit = {
   proveBaseCaseKeep(): Promise<RecordedBaseProofHandle>;
   proveBaseCaseKeepWithWitness(witness: string[]): Promise<RecordedBaseProofHandle>;
   proveN1OverWithWitness(
-    previous: RecordedBaseProofHandle,
+    previous: RecordedProofHandle,
     witness: string[]
   ): Promise<RecordedN1ProofResult>;
+  proveN1OverKeepWithWitness(
+    previous: RecordedProofHandle,
+    witness: string[]
+  ): Promise<RecordedN1ProofHandle>;
   proveN1(): Promise<RecordedN1ProofResult>;
   proveStableN1(additionalStableCycles?: number): Promise<RecordedStableN1ProofResult>;
   proveN(recursiveCycles: number): Promise<RecordedN1ProofResult | RecordedStableN1ProofResult>;
@@ -530,7 +541,7 @@ async function proveRecordedBaseCaseKeepCompiled(
 }
 
 async function proveRecordedN1OverCompiled(
-  previous: RecordedBaseProofHandle,
+  previous: RecordedProofHandle,
   compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'> & {
     minaRuntime?: MinaRuntimeCompiled;
   }
@@ -559,6 +570,34 @@ async function proveRecordedN1OverCompiled(
   );
 }
 
+async function proveRecordedN1OverKeepCompiled(
+  previous: RecordedProofHandle,
+  compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'> & {
+    minaRuntime?: MinaRuntimeCompiled;
+  }
+): Promise<RecordedN1ProofHandle> {
+  if (!isMinaRuntimeBaseHandle(previous.handle)) {
+    throw Error('retained recursive N1 handles require the mina-runtime backend');
+  }
+  let { client, proofId } = previous.handle;
+  let temporary = compiled.minaRuntime === undefined;
+  let circuitId =
+    compiled.minaRuntime?.circuitId ?? client.compileCircuit(compiled.circuit).circuitId;
+  try {
+    let { proofId: nextProofId, ...result } = await client.proveCircuitN1Over(
+      circuitId,
+      proofId,
+      compiled.witness
+    );
+    return {
+      ...result,
+      handle: { kind: 'mina-runtime', client, proofId: nextProofId },
+    };
+  } finally {
+    if (temporary) client.dropCircuit(circuitId);
+  }
+}
+
 function isMinaRuntimeBaseHandle(value: unknown): value is MinaRuntimeBaseHandle {
   return (
     typeof value === 'object' &&
@@ -567,7 +606,7 @@ function isMinaRuntimeBaseHandle(value: unknown): value is MinaRuntimeBaseHandle
   );
 }
 
-function releaseRecordedBaseProofHandle(previous: RecordedBaseProofHandle) {
+function releaseRecordedBaseProofHandle(previous: RecordedProofHandle) {
   if (!isMinaRuntimeBaseHandle(previous.handle)) return;
   previous.handle.client.dropProof(previous.handle.proofId);
 }
@@ -663,6 +702,8 @@ async function compileRecorded(
       proveRecordedBaseCaseKeepCompiled({ ...compiled, witness }),
     proveN1OverWithWitness: (previous, witness) =>
       proveRecordedN1OverCompiled(previous, { ...compiled, witness }),
+    proveN1OverKeepWithWitness: (previous, witness) =>
+      proveRecordedN1OverKeepCompiled(previous, { ...compiled, witness }),
     proveN1: () => proveRecordedN1Compiled(compiled),
     proveStableN1: (additionalStableCycles = 0) =>
       proveRecordedStableN1Compiled(compiled, additionalStableCycles),
