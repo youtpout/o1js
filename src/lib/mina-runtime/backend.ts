@@ -4,6 +4,7 @@ export {
   MinaRuntimeClient,
   type BackendInfo,
   type CompiledCircuit,
+  type CompiledProgram,
   type KeptProofResponse,
   type MinaRuntimeTransport,
   type RecordedCircuit,
@@ -37,6 +38,8 @@ type CompiledCircuit = {
   witnessSize: number;
   publicOutputSize: number;
 };
+
+type CompiledProgram = { branches: CompiledCircuit[] };
 
 type RustProofResponse = {
   appState: string[];
@@ -84,8 +87,18 @@ class MinaRuntimeClient {
     return this.#info;
   }
 
-  compileCircuit(circuit: RecordedCircuit) {
-    return this.#execute<CompiledCircuit>('compileCircuit', { circuit });
+  compileCircuit(circuit: RecordedCircuit, witness: string[], proofsVerified: 0 | 1 | 2) {
+    return this.#execute<CompiledCircuit>('compileCircuit', {
+      circuit,
+      witness,
+      proofsVerified,
+    });
+  }
+
+  compileProgram(
+    branches: { circuit: RecordedCircuit; witness: string[]; proofsVerified: 0 | 1 | 2 }[]
+  ) {
+    return this.#execute<CompiledProgram>('compileProgram', { branches });
   }
 
   proveCircuit(circuitId: number, witness: string[], signal?: AbortSignal) {

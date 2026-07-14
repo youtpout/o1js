@@ -43,6 +43,17 @@ const Program = ZkProgram({
 let { verificationKey } = await Program.compile({ cache: Cache.None });
 let { proof: first } = await Program.base(Field(0), Field(3));
 let { proof: second } = await Program.base(Field(0), Field(4));
+let firstOutput = first.publicOutput;
+first.publicOutput = Field(30);
+await Program.merge(Field(34), first, second).then(
+  () => {
+    throw Error('N2 accepted public fields that did not match the retained proof handle');
+  },
+  (error) => {
+    if (!String(error).includes('does not match its retained proof handle')) throw error;
+  }
+);
+first.publicOutput = firstOutput;
 let { proof: merged } = await Program.merge(Field(7), first, second);
 
 if (!(await Program.verify(merged))) throw Error('regular mina-runtime N2 proof was rejected');

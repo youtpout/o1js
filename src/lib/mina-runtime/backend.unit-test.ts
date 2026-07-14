@@ -42,8 +42,40 @@ describe('MinaRuntimeClient', () => {
     );
     let circuit = { aux_count: 0, output: [], constraints: [] };
 
-    expect(client.compileCircuit(circuit)).toMatchObject({ circuitId: 7 });
-    expect(seen).toEqual({ operation: 'compileCircuit', input: { circuit } });
+    expect(client.compileCircuit(circuit, [], 0)).toMatchObject({ circuitId: 7 });
+    expect(seen).toEqual({
+      operation: 'compileCircuit',
+      input: { circuit, witness: [], proofsVerified: 0 },
+    });
+  });
+
+  it('compiles every program branch in one wire request', () => {
+    let seen: unknown;
+    let client = new MinaRuntimeClient(
+      transport((request) => {
+        seen = request;
+        return {
+          operation: 'programCompiled',
+          output: { branches: [{ circuitId: 7 }, { circuitId: 8 }] },
+        };
+      })
+    );
+    let circuit = { aux_count: 0, output: [], constraints: [] };
+    expect(
+      client.compileProgram([
+        { circuit, witness: [], proofsVerified: 0 },
+        { circuit, witness: [], proofsVerified: 1 },
+      ]).branches
+    ).toHaveLength(2);
+    expect(seen).toEqual({
+      operation: 'compileProgram',
+      input: {
+        branches: [
+          { circuit, witness: [], proofsVerified: 0 },
+          { circuit, witness: [], proofsVerified: 1 },
+        ],
+      },
+    });
   });
 
   it('rejects incompatible wire versions before executing requests', () => {

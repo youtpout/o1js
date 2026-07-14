@@ -26,7 +26,7 @@ let circuit: RecordedCircuit = {
   ],
 };
 
-let compiled = client.compileCircuit(circuit);
+let compiled = client.compileCircuit(circuit, ['6', '36'], 0);
 let proved = await client.proveCircuit(compiled.circuitId, ['6', '36']);
 let verified = await client.verifyProof(proved.appState, proved.proof);
 if (!verified.valid) throw Error(`mina-rust rejected its proof: ${verified.reason}`);

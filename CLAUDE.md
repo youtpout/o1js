@@ -184,6 +184,9 @@ The first regular API slice is implemented behind `O1JS_PROOF_SYSTEM=rust` or
   rejection;
 - regular N2 proving over two compatible retained base proofs, with the new
   method's constraints executed inside the width-2 step;
+- one atomic `compileProgram` request for all methods: Rust ignores o1js'
+  `lazyMode` and eagerly creates the base, first-recursive, stable-recursive,
+  and N2 indexes required by each branch before `ZkProgram.compile()` returns;
 - public-input and public-output binding in the Rust application statement;
 - `Proof.toJSON()` / `Proof.fromJSON()` round trips with tamper rejection;
 - explicit circuit-resource disposal and reusable runtime circuit handles;
@@ -241,10 +244,11 @@ regular `O1JS_PROOF_SYSTEM=rust` programs still require the N-API adapter.
 The Rust WASM exports must execute inside `withThreadPool()`, and the exported
 Rust functions must in turn enter `rayon::ThreadPool::install`; initializing
 workers alone does not route Rayon work into that pool. Reusable compiled
-handles now retain the base and N1 Step/Wrap indexes in WASM or N-API memory;
-the circuit witness is a proving input and no longer captured by the compiled
-Wrap/recursive-Step circuit. `compileN1Over()` compiles an N1 transition against
-a retained base proof, and both compiled handles support repeated proving.
+handles now retain the base, first/stable N1, and N2 Step/Wrap indexes in WASM
+or N-API memory; the circuit witness is a proving input and no longer captured
+by the compiled Wrap/recursive-Step circuit. `compileN1Over()` compiles an N1
+transition against a retained base proof, and both compiled handles support
+repeated proving.
 
 The 2026-07-14 AddZkProgram benchmark disables the o1js key cache and covers
 JSOO/Rust on WASM/native. Once compiled, Rust proving is faster than JSOO:

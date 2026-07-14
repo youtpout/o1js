@@ -12,7 +12,7 @@ import { prefixes } from '../../bindings/crypto/constants.js';
 import { prefixToField } from '../../bindings/lib/binable.js';
 import { EmptyUndefined, EmptyVoid } from '../../bindings/lib/generic.js';
 import { From, InferValue } from '../../bindings/lib/provable-generic.js';
-import { getProofSystemBackend, lockProofSystemBackend } from '../backend.js';
+import { getBackendPreference, getProofSystemBackend, lockProofSystemBackend } from '../backend.js';
 import { MlArray, MlBool, MlPair, MlResult } from '../ml/base.js';
 import { MlFieldArray, MlFieldConstArray } from '../ml/fields.js';
 import { FieldConst, FieldVar } from '../provable/core/fieldvar.js';
@@ -43,6 +43,7 @@ import { decodeProverKey, encodeProverKey, parseHeader } from './prover-keys.js'
 import {
   compileRecorded,
   compileRecordedN1Over,
+  compileRecordedProgram,
   proveRecordedBaseCase,
   proveRecordedBaseCaseKeep,
   proveRecordedN1,
@@ -532,19 +533,22 @@ function ZkProgram<
         releaseRustProofResources();
         for (let compiled of rustCompiledMethods.values()) compiled.dispose();
         rustCompiledMethods.clear();
-        for (let [i, key] of methodKeys.entries()) {
-          let synthesized = privateInputTypes[i].map((type) =>
-            ProvableType.synthesize(ProvableType.get(type))
-          );
-          let inputArgs = hasPublicInput
-            ? [ProvableType.synthesize(publicInputType), ...synthesized]
-            : synthesized;
-          let compiled = await compileRecorded(
-            () => rustPicklesOutputFieldsForMethod(key, inputArgs as any, true),
-            cache
-          );
-          rustCompiledMethods.set(key, compiled);
-        }
+        let compiledBranches = await compileRecordedProgram(
+          methodKeys.map((key, i) => {
+            let synthesized = privateInputTypes[i].map((type) =>
+              ProvableType.synthesize(ProvableType.get(type))
+            );
+            let inputArgs = hasPublicInput
+              ? [ProvableType.synthesize(publicInputType), ...synthesized]
+              : synthesized;
+            return {
+              circuit: () => rustPicklesOutputFieldsForMethod(key, inputArgs as any, true),
+              proofsVerified: proofs[i].length as 0 | 1 | 2,
+            };
+          }),
+          cache
+        );
+        methodKeys.forEach((key, i) => rustCompiledMethods.set(key, compiledBranches[i]));
         let hash = Field(BigInt(`0x${await digest()}`));
         let data =
           'mina-runtime-v1:' +
@@ -596,6 +600,32 @@ function ZkProgram<
 
   let rustCompiledMethods = new Map<MethodKey, RecordedCompiledCircuit>();
   let rustProofResources = new Set<ReturnType<typeof getRustPicklesProofResource>>();
+
+  function retainedRustProof(proof: ProofBase<any, any>): RecordedProofHandle {
+    let resource = getRustPicklesProofResource(proof);
+    if (resource?.kind !== 'proof') {
+      throw Error(
+        'Rust Pickles cannot continue this recursive chain: the previous proof was ' +
+          'serialized or was not retained in this process.'
+      );
+    }
+    let handle = resource.value as RecordedProofHandle;
+    let publicFields = proof
+      .publicFields()
+      .input.concat(proof.publicFields().output)
+      .map((field) => field.toString());
+    let payload = getRustPicklesProof(proof);
+    let matches = (appState: string[] | undefined) =>
+      appState !== undefined &&
+      appState.length === publicFields.length &&
+      appState.every((field, index) => field === publicFields[index]);
+    if (!matches(payload?.appState) || !matches(handle.appState)) {
+      throw Error(
+        'Rust Pickles rejected a SelfProof whose public input/output does not match its retained proof handle.'
+      );
+    }
+    return handle;
+  }
 
   function releaseRustProofResources() {
     for (let resource of rustProofResources) resource?.drop();
@@ -662,28 +692,14 @@ function ZkProgram<
             retained = await rustCompiled.proveBaseCaseKeepWithWitness(recorded.witness);
             result = { appState: retained.appState, proof: retained.proof };
           } else if (previousProofs.length === 1) {
-            let resource = getRustPicklesProofResource(previousProofs[0]);
-            if (resource?.kind !== 'proof') {
-              throw Error(
-                'mina-runtime cannot continue this recursive chain: the previous proof was ' +
-                  'serialized or was not retained in this process.'
-              );
-            }
-            retained = await rustCompiled.proveN1OverKeepWithWitness(
-              resource.value as RecordedProofHandle,
-              recorded.witness
-            );
+            let previous = retainedRustProof(previousProofs[0]);
+            retained = await rustCompiled.proveN1OverKeepWithWitness(previous, recorded.witness);
             result = retained;
           } else if (previousProofs.length === 2) {
-            let resources = previousProofs.map((proof) => getRustPicklesProofResource(proof));
-            if (resources.some((resource) => resource?.kind !== 'proof')) {
-              throw Error(
-                'mina-runtime cannot prove N2: both previous proofs must be retained in this process.'
-              );
-            }
+            let previous = previousProofs.map(retainedRustProof);
             result = await rustCompiled.proveN2OverWithWitness(
-              resources[0]!.value as RecordedBaseProofHandle,
-              resources[1]!.value as RecordedBaseProofHandle,
+              previous[0] as RecordedBaseProofHandle,
+              previous[1] as RecordedBaseProofHandle,
               recorded.witness
             );
           } else {
@@ -948,7 +964,7 @@ function ZkProgram<
       ) {
         return Promise.resolve(false);
       }
-      return getProofSystemBackend() === 'rust'
+      return getProofSystemBackend() === 'rust' && getBackendPreference() === 'native'
         ? verifyRecordedProofViaMinaRuntime(
             rustProof.recursion === undefined
               ? (rustProof as RecordedProofResult)

@@ -482,4 +482,38 @@ without producing a temporary cryptographic Step proof.
 `~/Projects/proof-systems/pickles/src/recursive_step.rs`,
 `~/Projects/zkapp-rust/contracts/src/AddZkProgram.bench.ts`
 
+date: 2026-07-14 agent: codex session: pickles-eager-program-compile category:
+architecture severity: high tags: [pickles, zkprogram, napi, wasm, recursion]
+
+---
+
+### Rust ZkProgram compilation is atomic and no longer defers stable N1 indexes
+
+**Context:** Compiled base/N1/N2 handles existed, but regular Rust
+`ZkProgram.compile()` registered methods one at a time. A second N1 cycle could
+also fall back to a helper that rebuilt Step and Wrap indexes during proving.
+
+**What happened:** Base index discovery additionally tried to prove the
+placeholder values synthesized by o1js analysis, so arbitrary assertions could
+make compilation fail even though the circuit shape was valid.
+
+**Resolution/Workaround:** Pickles now builds the base Wrap constraint system
+from a proof-shaped structural witness and derives the real Lagrange constants
+from the Step index, without producing an invalid application proof. The N1
+compiled handle eagerly retains separate index pairs for the first transition
+and the stable recursive shape; the compile-on-prove fallback was removed.
+mina-runtime added an atomic `compileProgram` request, shared unchanged by NAPI
+and WASM, and o1js records all methods before sending that single request. N0,
+N1, N2, chained stable N1, TypeScript, NAPI, and WASM checks pass.
+
+**Key takeaway:** Compilation witnesses determine circuit structure and fixed
+coefficients, not application satisfiability. Every index needed by a supported
+branch must be owned before `ZkProgram.compile()` returns.
+
+**Relevant files:** `src/lib/proof-system/zkprogram.ts`,
+`src/lib/proof-system/rust-pickles-recorded.ts`,
+`src/lib/mina-runtime/backend.ts`,
+`~/Projects/mina-rust/crates/mina-runtime/src/backend.rs`,
+`~/Projects/proof-systems/pickles/src/recorded.rs`
+
 <!-- END LOG -->
