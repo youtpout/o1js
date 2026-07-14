@@ -950,6 +950,7 @@ async function compileRecorded(
     );
     if (
       !restoredFromCache &&
+      cache.canWrite &&
       cacheHeader !== undefined &&
       bindings.rust_pickles_recorded_base_cache_bytes
     ) {
