@@ -368,6 +368,11 @@ function ZkProgram<
       methodName: K,
       ...args: Parameters<InferMethodType<Config>[K]['method']>
     ): Promise<RecordedCompiledCircuit>;
+    compileWithCache<K extends keyof Config['methods']>(
+      cache: Cache,
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ): Promise<RecordedCompiledCircuit>;
     compileN1Over<K extends keyof Config['methods']>(
       previous: RecordedBaseProofHandle,
       methodName: K,
@@ -534,8 +539,9 @@ function ZkProgram<
           let inputArgs = hasPublicInput
             ? [ProvableType.synthesize(publicInputType), ...synthesized]
             : synthesized;
-          let compiled = await compileRecorded(() =>
-            rustPicklesOutputFieldsForMethod(key, inputArgs as any, true)
+          let compiled = await compileRecorded(
+            () => rustPicklesOutputFieldsForMethod(key, inputArgs as any, true),
+            cache
           );
           rustCompiledMethods.set(key, compiled);
         }
@@ -844,6 +850,13 @@ function ZkProgram<
       ...args: Parameters<InferMethodType<Config>[K]['method']>
     ) {
       return compileRecorded(() => rustPicklesOutputFieldsForMethod(methodName, args));
+    },
+    async compileWithCache<K extends MethodKey>(
+      cache: Cache,
+      methodName: K,
+      ...args: Parameters<InferMethodType<Config>[K]['method']>
+    ) {
+      return compileRecorded(() => rustPicklesOutputFieldsForMethod(methodName, args), cache);
     },
     async compileN1Over<K extends MethodKey>(
       previous: RecordedBaseProofHandle,

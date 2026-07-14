@@ -26,6 +26,7 @@ import {
 import { FieldConst, FieldType, FieldVar } from '../provable/core/fieldvar.js';
 import { snarkContext } from '../provable/core/provable-context.js';
 import type { Field } from '../provable/field.js';
+import { Cache, readCache, withVersion, writeCache, type CacheHeader } from './cache.js';
 
 export {
   compileRecorded,
@@ -449,6 +450,13 @@ async function recordCircuit(
 type RustPicklesBindings = {
   rust_pickles_compile_recorded_base?: (circuit: string, witness: string[]) => unknown;
   rust_pickles_compile_recorded_base_bytes?: (circuit: string, witness: Uint8Array) => unknown;
+  rust_pickles_recorded_base_cache_key?: (circuit: string) => string;
+  rust_pickles_recorded_base_cache_bytes?: (compiled: unknown) => Uint8Array;
+  rust_pickles_compile_recorded_base_from_cache_bytes?: (
+    circuit: string,
+    witness: Uint8Array,
+    cache: Uint8Array
+  ) => unknown;
   rust_pickles_prove_recorded_base_keep_compiled?: (
     compiled: unknown,
     witness: string[]
@@ -886,7 +894,8 @@ async function proveRecordedN2Compiled(
  * proving variants for the same witness.
  */
 async function compileRecorded(
-  f: () => Field[] | Promise<Field[]>
+  f: () => Field[] | Promise<Field[]>,
+  cache: Cache = Cache.FileSystemDefault
 ): Promise<RecordedCompiledCircuit> {
   let recorded = await recordCircuit(f, { validateWitness: false });
   let minaRuntime: MinaRuntimeCompiled | undefined;
@@ -901,14 +910,51 @@ async function compileRecorded(
       throw Error('Rust Pickles bindings do not expose reusable compiled indexes.');
     }
     let circuitJson = JSON.stringify(recorded.circuit);
-    let handle = await runRustPickles(() =>
-      bindings.rust_pickles_compile_recorded_base_bytes
-        ? bindings.rust_pickles_compile_recorded_base_bytes(
+    let witnessBytes = fpWitnessToBytes(recorded.witness);
+    let cacheKey = bindings.rust_pickles_recorded_base_cache_key?.(circuitJson);
+    let cacheHeader =
+      cacheKey === undefined
+        ? undefined
+        : withVersion({
+            kind: 'step-pk',
+            persistentId: cacheKey,
+            uniqueId: cacheKey,
+            dataType: 'bytes',
+            programName: 'rust-pickles-recorded',
+            methodName: cacheKey,
+            methodIndex: 0,
+            hash: cacheKey,
+          } as Omit<CacheHeader, 'version'>);
+    let handle: unknown | undefined;
+    let restoredFromCache = false;
+    let cachedBytes = cacheHeader === undefined ? undefined : readCache(cache, cacheHeader);
+    if (cachedBytes !== undefined && bindings.rust_pickles_compile_recorded_base_from_cache_bytes) {
+      try {
+        handle = await runRustPickles(() =>
+          bindings.rust_pickles_compile_recorded_base_from_cache_bytes!(
             circuitJson,
-            fpWitnessToBytes(recorded.witness)
+            witnessBytes,
+            cachedBytes
           )
+        );
+        restoredFromCache = true;
+      } catch {
+        // Invalid cache data is only a miss. Rust compares the complete
+        // reconstructed constraint system before accepting an index.
+      }
+    }
+    handle ??= await runRustPickles(() =>
+      bindings.rust_pickles_compile_recorded_base_bytes
+        ? bindings.rust_pickles_compile_recorded_base_bytes(circuitJson, witnessBytes)
         : bindings.rust_pickles_compile_recorded_base!(circuitJson, recorded.witness)
     );
+    if (
+      !restoredFromCache &&
+      cacheHeader !== undefined &&
+      bindings.rust_pickles_recorded_base_cache_bytes
+    ) {
+      writeCache(cache, cacheHeader, bindings.rust_pickles_recorded_base_cache_bytes(handle));
+    }
     directRust = { bindings, handle };
   }
   let compiled: RecordedCompiledCircuit & {
