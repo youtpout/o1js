@@ -165,6 +165,24 @@ tests consume. Those tests dump both circuits and report their differences:
 ./run src/tests/rust-pickles-recorded.ts          # recorded prove/verify
 ```
 
+#### Rust WASM bindings (wasm transport)
+
+`npm run build:wasm:node` builds the jsoo Kimchi WASM bindings via dune (the
+default). To build the **rust** Kimchi WASM bindings instead — so
+`setProofSystemBackend('rust')` works over the wasm transport — use the
+dedicated command:
+
+```sh
+npm run build:wasm:node:rust
+```
+
+It builds `kimchi-wasm` from `proof-systems/pickle-rs` (carrying the
+`rust_pickles_*` exports) and installs it into
+`src/bindings/compiled/node_bindings/`, replacing the jsoo Kimchi WASM. The
+proof-systems checkout is resolved automatically from the `src/mina-rust`
+submodule's Cargo graph — no `PROOF_SYSTEMS_ROOT`/URL to pass (set it to
+override). Needs the nightly wasm toolchain and `wasm-pack`.
+
 ## Building with nix
 
 Much like the Mina repo, we use the nix registry to conveniently handle git
@@ -445,7 +463,8 @@ targeted scripts.
 | `npm run build:bindings-node`               | Builds the OCaml and Rust Node bindings used by o1js.                                      |
 | `npm run build:bindings-transaction-layout` | Regenerates the TypeScript constant and transaction layout definitions from OCaml sources. |
 | `npm run build:wasm`                        | Builds all WebAssembly (WASM) bindings for both Node and Web.                              |
-| `npm run build:wasm:node`                   | Builds the Kimchi WASM bindings for Node.js.                                               |
+| `npm run build:wasm:node`                   | Builds the jsoo Kimchi WASM bindings for Node.js (via dune).                               |
+| `npm run build:wasm:node:rust`              | Builds the rust Kimchi WASM bindings for Node.js from proof-systems/pickle-rs.             |
 | `npm run build:wasm:web`                    | Builds and optimizes the Kimchi WASM bindings for Web browsers.                            |
 | `npm run build:jsoo`                        | Builds all Js_of_OCaml (JSOO) bindings for both Node and Web.                              |
 | `npm run build:jsoo:node`                   | Builds the Js_of_OCaml Node bindings.                                                      |
