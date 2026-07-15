@@ -99,13 +99,35 @@ right compiler automatically. Node ≥ 22 is required for `@napi-rs/cli` 3.x.
 
 ### Production path: the mina-runtime adapter
 
-Build the N-API adapter in the `mina-rust` checkout (see its README for the
-exact command), then point o1js at the resulting `.node` addon with
-`O1JS_MINA_RUNTIME_PATH`. The end-to-end smoke test exercises the full
-compile/prove/verify round trip through the adapter:
+The `mina-rust` proving adapter is vendored as the `src/mina-rust` submodule
+(branch `pickle-rs`). Fetch it and build the rust backend with a single npm
+command:
 
 ```sh
-O1JS_MINA_RUNTIME_PATH=/absolute/path/to/mina_runtime_napi.node \
+git submodule update --init src/mina-rust
+npm run build:rust-backend
+```
+
+`build:rust-backend` compiles the `mina-runtime-napi` addon from the submodule
+and installs it as the `@o1js/mina-runtime-<platform>-<arch>` package under
+`node_modules`, so o1js loads the Rust Pickles backend by default — no
+`O1JS_MINA_RUNTIME_PATH` needed. Select it at runtime with
+`setProofSystemBackend('rust')`. This alone is enough for the default (wasm)
+transport; for the **native** transport also run `npm run build:native` (see
+the parity path below). Override the submodule with `MINA_RUST_ROOT=/abs/path`
+to build against a local `mina-rust` clone.
+
+The end-to-end smoke test exercises the full compile/prove/verify round trip
+through the adapter (with the package installed, the env var is optional):
+
+```sh
+./run src/tests/mina-runtime.ts
+```
+
+You can still point at a hand-built `.node` instead of the installed package:
+
+```sh
+O1JS_MINA_RUNTIME_PATH=/absolute/path/to/mina_runtime.node \
   ./run src/tests/mina-runtime.ts
 ```
 
@@ -389,6 +411,12 @@ If you want to build **o1js** for both **Node** and **Web**, run:
 ```sh
 npm run build:bindings-all
 ```
+
+```sh
+PROOF_SYSTEMS_ROOT=~/Projects/proof-systems \
+  PATH=$PWD/node_modules/.bin:$PATH \
+  bash scripts/build/native/build.sh
+```  
 
 This script builds the bindings for **both** environments and compiles the
 project to JavaScript for Node and Web as well.
