@@ -472,6 +472,10 @@ type RustPicklesBindings = {
     compiled: unknown,
     witness: Uint8Array
   ) => unknown;
+  rust_pickles_recorded_base_donor_handle_bytes?: (
+    compiled: unknown,
+    witness: Uint8Array
+  ) => unknown;
   rust_pickles_prove_recorded_n2_over_base_handles?: (
     first: unknown,
     second: unknown,
@@ -1141,7 +1145,11 @@ async function compileRecordedEnvelope(
     }
     let direct: DirectRustCompiled = { bindings, handle };
     if (proofsVerified > 0) {
-      let proveTemplate = bindings.rust_pickles_prove_recorded_base_keep_compiled_bytes;
+      // Prefer the proof-free donor template (no prover runs at compile time;
+      // proven index-equivalent in pickles). Fall back to proving one.
+      let proveTemplate =
+        bindings.rust_pickles_recorded_base_donor_handle_bytes ??
+        bindings.rust_pickles_prove_recorded_base_keep_compiled_bytes;
       if (proveTemplate === undefined) {
         throw Error('Rust Pickles bindings cannot synthesize the compile-time proof template.');
       }
