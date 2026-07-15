@@ -45,7 +45,7 @@ if (!decode) throw Error('@o1js/native does not expose rust_pickles_decode_side_
 
 console.log('compiling via jsoo Pickles...');
 let t0 = Date.now();
-let { verificationKey } = await Program.compile();
+let { verificationKey } = await Program.compile({ forceRecompile: true });
 console.log(`jsoo compile in ${Date.now() - t0}ms`);
 let jsooVk: DecodedVk = JSON.parse(decode(verificationKey.data, 'base64'));
 let jsooVkFromCanonicalBase58: DecodedVk = JSON.parse(decode(jsooVk.base58, 'base58'));
@@ -145,6 +145,15 @@ for (let i = 0; i < Math.min(jsooVk.commitments.length, rustVk.commitments.lengt
 console.log(
   `  ${matching === jsooVk.commitments.length ? '==' : '!='} commitments: ${matching}/${jsooVk.commitments.length} equal`
 );
+// cross-check: detect index swaps among the mismatched commitments
+for (let i = 0; i < jsooVk.commitments.length; i++) {
+  if (JSON.stringify(jsooVk.commitments[i]) === JSON.stringify(rustVk.commitments[i])) continue;
+  for (let j = 0; j < rustVk.commitments.length; j++) {
+    if (JSON.stringify(jsooVk.commitments[i]) === JSON.stringify(rustVk.commitments[j])) {
+      console.log(`     note: jsoo ${COMMITMENT_NAMES[i]} == rust ${COMMITMENT_NAMES[j]}`);
+    }
+  }
+}
 if (matching !== jsooVk.commitments.length) {
   for (let i = 0; i < Math.min(jsooVk.commitments.length, rustVk.commitments.length); i++) {
     let equal = JSON.stringify(jsooVk.commitments[i]) === JSON.stringify(rustVk.commitments[i]);
