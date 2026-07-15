@@ -77,6 +77,72 @@ commit, or you just don't have a PR you may can run
 `npm run build:bindings-remote`. This will trigger our self-hosted runner to
 build the bindings for your commit and download them once it finishes.
 
+## Building the Rust proof-system backend
+
+o1js is migrating its proving backend from OCaml/`js_of_ocaml` to a pure-Rust
+recursion stack. See [`RUST_MIGRATION.md`](RUST_MIGRATION.md) for the full
+status. The supported dependency direction is:
+
+```text
+o1js  ->  mina-runtime (mina-rust)  ->  proof-systems (pickle-rs)
+```
+
+You need local checkouts of the two Rust repos on their integration branches:
+
+- [`proof-systems`](https://github.com/youtpout/proof-systems) — branch
+  `pickle-rs` (the `snarky`, `pickles`, `kimchi-napi`, `kimchi-wasm` crates).
+- [`mina-rust`](https://github.com/youtpout/mina-rust) — branch `pickle-rs`
+  (the `mina-runtime*` adapter crates).
+
+Both pin stable Rust `1.92` via `rust-toolchain.toml`, so `rustup` picks the
+right compiler automatically. Node ≥ 22 is required for `@napi-rs/cli` 3.x.
+
+### Production path: the mina-runtime adapter
+
+Build the N-API adapter in the `mina-rust` checkout (see its README for the
+exact command), then point o1js at the resulting `.node` addon with
+`O1JS_MINA_RUNTIME_PATH`. The end-to-end smoke test exercises the full
+compile/prove/verify round trip through the adapter:
+
+```sh
+O1JS_MINA_RUNTIME_PATH=/absolute/path/to/mina_runtime_napi.node \
+  ./run src/tests/mina-runtime.ts
+```
+
+The release gate runs the same N0 ZkProgram against both the jsoo reference and
+the mina-runtime backend in isolated processes and reports correctness, circuit
+shape, and verification-key parity (see
+[`tests/mina-runtime/README.md`](tests/mina-runtime/README.md)):
+
+```sh
+O1JS_MINA_RUNTIME_PATH=/absolute/path/to/mina_runtime_napi.node \
+  npm run mina-runtime:parity        # report only
+O1JS_MINA_RUNTIME_PATH=/absolute/path/to/mina_runtime_napi.node \
+  npm run mina-runtime:release-gate  # enforce every criterion
+```
+
+### Parity path: direct proof-systems bindings
+
+For the recorder and gate-level parity tooling, o1js can build the
+`kimchi-napi` package straight from a local `proof-systems` checkout, bypassing
+the `src/mina` submodule. Point `PROOF_SYSTEMS_ROOT` at the checkout and put the
+local `napi` CLI on the `PATH`:
+
+```sh
+PROOF_SYSTEMS_ROOT=/absolute/path/to/proof-systems \
+  PATH=$PWD/node_modules/.bin:$PATH \
+  npm run build:native
+```
+
+This produces the `@o1js/native-<platform>-<arch>` package that the gate-diff
+tests consume. Those tests dump both circuits and report their differences:
+
+```sh
+./run src/tests/rust-pickles-step-gates-diff.ts   # step circuit vs jsoo
+./run src/tests/rust-pickles-wrap-gates-diff.ts   # wrap circuit vs jsoo
+./run src/tests/rust-pickles-recorded.ts          # recorded prove/verify
+```
+
 ## Building with nix
 
 Much like the Mina repo, we use the nix registry to conveniently handle git
