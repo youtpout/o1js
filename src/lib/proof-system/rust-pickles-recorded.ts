@@ -486,6 +486,11 @@ type RustPicklesBindings = {
     witness: Uint8Array
   ) => unknown;
   rust_pickles_recorded_base_vk_envelope?: (compiled: unknown) => string;
+  rust_pickles_compile_recorded_program?: (
+    branchesJson: string
+  ) => [unknown, unknown | null, unknown | null][];
+  rust_pickles_seed_lagrange_basis?: (curve: string, domainLog2: number, bytes: Uint8Array) => boolean;
+  rust_pickles_export_lagrange_basis?: (curve: string, domainLog2: number) => Uint8Array;
   rust_pickles_prove_recorded_n2_over_base_handles?: (
     first: unknown,
     second: unknown,
@@ -1053,6 +1058,62 @@ async function compileRecorded(
   return compileRecordedEnvelope(recorded, cache, proofsVerified);
 }
 
+/** The fixed recursion domains warmed by pickles' compile paths. */
+const LAGRANGE_CACHE_ENTRIES: [curve: 'vesta' | 'pallas', srsLog2: number, domainLog2: number][] = [
+  ['vesta', 16, 14],
+  ['vesta', 16, 15],
+  ['vesta', 16, 16],
+  ['pallas', 15, 13],
+  ['pallas', 15, 15],
+];
+
+function lagrangeCacheDir() {
+  let env = process.env.PICKLES_CACHE_DIR;
+  if (env !== undefined) return env;
+  let xdg = process.env.XDG_CACHE_HOME;
+  if (xdg !== undefined) return `${xdg}/pickles-rs`;
+  return `${process.env.HOME}/.cache/pickles-rs`;
+}
+
+/**
+ * wasm has no filesystem: read the Lagrange-basis cache files the native side
+ * persists (`~/.cache/pickles-rs`) and seed the wasm-side SRS caches, saving
+ * 0.3-1.9s of group-IFFT per domain per process.
+ */
+async function seedLagrangeCaches(bindings: RustPicklesBindings) {
+  if (bindings.rust_pickles_seed_lagrange_basis === undefined) return;
+  let fs = await import('node:fs');
+  let dir = lagrangeCacheDir();
+  for (let [curve, srsLog2, domainLog2] of LAGRANGE_CACHE_ENTRIES) {
+    try {
+      let bytes = fs.readFileSync(`${dir}/lagrange-${curve}-srs${1 << srsLog2}-d${domainLog2}.bin`);
+      bindings.rust_pickles_seed_lagrange_basis(curve, domainLog2, bytes);
+    } catch {
+      // missing cache file: the basis is recomputed (and persisted below)
+    }
+  }
+}
+
+/** Persist freshly computed bases so the next process seeds them from disk. */
+async function persistLagrangeCaches(bindings: RustPicklesBindings) {
+  if (bindings.rust_pickles_export_lagrange_basis === undefined) return;
+  let fs = await import('node:fs');
+  let dir = lagrangeCacheDir();
+  for (let [curve, srsLog2, domainLog2] of LAGRANGE_CACHE_ENTRIES) {
+    let path = `${dir}/lagrange-${curve}-srs${1 << srsLog2}-d${domainLog2}.bin`;
+    try {
+      if (fs.existsSync(path)) continue;
+      let bytes = bindings.rust_pickles_export_lagrange_basis(curve, domainLog2);
+      if (bytes.length === 0) continue;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(`${path}.tmp`, bytes);
+      fs.renameSync(`${path}.tmp`, path);
+    } catch {
+      // persisting is best-effort
+    }
+  }
+}
+
 async function compileRecordedProgram(
   branches: {
     circuit: () => Field[] | Promise<Field[]>;
@@ -1068,6 +1129,35 @@ async function compileRecordedProgram(
   }
   if (profile) console.error(`[o1js compile] recording: ${(performance.now() - tRecord).toFixed(0)}ms`);
   if (!useMinaRuntimeBackend()) {
+    let bindings = await rustPicklesBindings();
+    await seedLagrangeCaches(bindings);
+    if (bindings.rust_pickles_compile_recorded_program !== undefined) {
+      // One call compiling every branch in parallel inside the rayon pool —
+      // per-method calls serialize across the wasm boundary.
+      let branchesJson = JSON.stringify(
+        recorded.map((entry, i) => ({
+          circuit: entry.circuit,
+          witness: entry.witness,
+          proofsVerified: branches[i].proofsVerified,
+        }))
+      );
+      let compiledHandles = await runRustPickles(() =>
+        bindings.rust_pickles_compile_recorded_program!(branchesJson)
+      );
+      if (profile) console.error(`[o1js compile] rust batch compile done`);
+      await persistLagrangeCaches(bindings);
+      return Promise.all(
+        recorded.map((entry, i) => {
+          let [handle, n1Handle, n2Handle] = compiledHandles[i];
+          return compileRecordedEnvelope(entry, cache, branches[i].proofsVerified, undefined, {
+            bindings,
+            handle,
+            n1Handle: n1Handle ?? undefined,
+            n2Handle: n2Handle ?? undefined,
+          });
+        })
+      );
+    }
     return Promise.all(
       recorded.map((entry, i) => compileRecordedEnvelope(entry, cache, branches[i].proofsVerified))
     );
@@ -1104,11 +1194,23 @@ async function compileRecordedEnvelope(
   recorded: Awaited<ReturnType<typeof recordCircuit>>,
   cache: Cache,
   proofsVerified: 0 | 1 | 2,
-  precompiledRuntime?: MinaRuntimeCompiled
+  precompiledRuntime?: MinaRuntimeCompiled,
+  precompiledDirect?: DirectRustCompiled
 ): Promise<RecordedCompiledCircuit> {
   let minaRuntime: MinaRuntimeCompiled | undefined;
   let directRust: DirectRustCompiled | undefined;
-  if (precompiledRuntime !== undefined) {
+  if (precompiledDirect !== undefined) {
+    directRust = precompiledDirect;
+    if (
+      directRust.verificationKey === undefined &&
+      directRust.bindings.rust_pickles_recorded_base_vk_envelope !== undefined
+    ) {
+      let envelope = JSON.parse(
+        directRust.bindings.rust_pickles_recorded_base_vk_envelope(directRust.handle)
+      ) as { base64: string; hash: string };
+      directRust.verificationKey = { data: envelope.base64, hash: envelope.hash };
+    }
+  } else if (precompiledRuntime !== undefined) {
     minaRuntime = precompiledRuntime;
   } else if (useMinaRuntimeBackend()) {
     let client = await minaRuntimeClient();
