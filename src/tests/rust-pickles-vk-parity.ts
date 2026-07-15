@@ -30,6 +30,7 @@ const Program = ZkProgram({
 });
 
 type DecodedVk = {
+  minaHash?: string;
   maxProofsVerified: number;
   actualWrapDomainSize: number;
   base64: string;
@@ -109,6 +110,13 @@ assertEqual('rust VK base58/base64 metadata roundtrip', {
 assertEqual('maxProofsVerified', jsooVk.maxProofsVerified, rustVk.maxProofsVerified);
 assertEqual('actualWrapDomainSize', jsooVk.actualWrapDomainSize, rustVk.actualWrapDomainSize);
 assertEqual('commitments.length', jsooVk.commitments.length, rustVk.commitments.length);
+// Mina account-level VK hash: the rust-computed hash of BOTH decoded keys must
+// equal the hash jsoo's Pickles reported for its verification key.
+if (jsooVk.minaHash !== undefined) {
+  assertEqual('jsoo minaHash == jsoo verificationKey.hash', jsooVk.minaHash, verificationKey.hash.toString());
+  assertEqual('rust minaHash == jsoo verificationKey.hash', rustVk.minaHash, verificationKey.hash.toString());
+  console.log(`  == minaHash: ${rustVk.minaHash}`);
+}
 
 // -- report ------------------------------------------------------------
 

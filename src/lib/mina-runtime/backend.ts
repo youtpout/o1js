@@ -34,6 +34,8 @@ type RecordedCircuit = {
 
 type CompiledCircuit = {
   circuitId: number;
+  verificationKeyBase64?: string;
+  verificationKeyHash?: string;
   circuitDigest: string;
   witnessSize: number;
   publicOutputSize: number;

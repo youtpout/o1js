@@ -549,6 +549,23 @@ function ZkProgram<
           cache
         );
         methodKeys.forEach((key, i) => rustCompiledMethods.set(key, compiledBranches[i]));
+        // Single-method non-recursive programs: the circuit's wrap VK is THE
+        // program VK, and with the wrap circuit at gate-level parity it is
+        // bit-identical to what jsoo's Pickles returns (canonical side-loaded
+        // base64 + Mina account hash). Multi-method / recursive programs
+        // still use the interim envelope until the shared program wrap lands.
+        let canonicalVk =
+          methodKeys.length === 1 && maxProofsVerified === 0
+            ? compiledBranches[0].verificationKey
+            : undefined;
+        if (canonicalVk !== undefined) {
+          return {
+            verificationKey: new VerificationKey({
+              data: canonicalVk.data,
+              hash: Field(BigInt(canonicalVk.hash)),
+            }),
+          };
+        }
         let hash = Field(BigInt(`0x${await digest()}`));
         let data =
           'mina-runtime-v1:' +

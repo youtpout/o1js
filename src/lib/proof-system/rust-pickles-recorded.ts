@@ -145,6 +145,9 @@ type RecordedProofHandle = RecordedBaseProofHandle | RecordedN1ProofHandle;
 type RecordedCompiledCircuit = {
   circuit: RecordedCircuitJson;
   witness: string[];
+  /** Canonical Mina side-loaded VK (base64 data + account hash), when the
+   * bindings expose it — bit-identical to jsoo's for width-0 circuits. */
+  verificationKey?: CanonicalVkEnvelope;
   proveBaseCase(): Promise<RecordedProofResult>;
   proveBaseCaseWithWitness(witness: string[]): Promise<RecordedProofResult>;
   proveBaseCaseKeep(): Promise<RecordedBaseProofHandle>;
@@ -188,9 +191,15 @@ type DirectRustCompiled = {
   handle: unknown;
   n1Handle?: unknown;
   n2Handle?: unknown;
+  verificationKey?: CanonicalVkEnvelope;
 };
 
-type MinaRuntimeCompiled = { client: MinaRuntimeClient; circuitId: number };
+type CanonicalVkEnvelope = { data: string; hash: string };
+type MinaRuntimeCompiled = {
+  client: MinaRuntimeClient;
+  circuitId: number;
+  verificationKey?: CanonicalVkEnvelope;
+};
 type MinaRuntimeBaseHandle = {
   kind: 'mina-runtime';
   proofKind: 'base' | 'n1';
@@ -476,6 +485,7 @@ type RustPicklesBindings = {
     compiled: unknown,
     witness: Uint8Array
   ) => unknown;
+  rust_pickles_recorded_base_vk_envelope?: (compiled: unknown) => string;
   rust_pickles_prove_recorded_n2_over_base_handles?: (
     first: unknown,
     second: unknown,
@@ -1072,6 +1082,14 @@ async function compileRecordedProgram(
       compileRecordedEnvelope(entry, cache, branches[i].proofsVerified, {
         client,
         circuitId: compiled.branches[i].circuitId,
+        verificationKey:
+          compiled.branches[i].verificationKeyBase64 !== undefined &&
+          compiled.branches[i].verificationKeyHash !== undefined
+            ? {
+                data: compiled.branches[i].verificationKeyBase64!,
+                hash: compiled.branches[i].verificationKeyHash!,
+              }
+            : undefined,
       })
     )
   );
@@ -1089,8 +1107,19 @@ async function compileRecordedEnvelope(
     minaRuntime = precompiledRuntime;
   } else if (useMinaRuntimeBackend()) {
     let client = await minaRuntimeClient();
-    let { circuitId } = client.compileCircuit(recorded.circuit, recorded.witness, proofsVerified);
-    minaRuntime = { client, circuitId };
+    let compiledCircuit = client.compileCircuit(recorded.circuit, recorded.witness, proofsVerified);
+    minaRuntime = {
+      client,
+      circuitId: compiledCircuit.circuitId,
+      verificationKey:
+        compiledCircuit.verificationKeyBase64 !== undefined &&
+        compiledCircuit.verificationKeyHash !== undefined
+          ? {
+              data: compiledCircuit.verificationKeyBase64,
+              hash: compiledCircuit.verificationKeyHash,
+            }
+          : undefined,
+    };
   } else {
     let bindings = await rustPicklesBindings();
     if (!bindings.rust_pickles_compile_recorded_base) {
@@ -1144,6 +1173,13 @@ async function compileRecordedEnvelope(
       writeCache(cache, cacheHeader, bindings.rust_pickles_recorded_base_cache_bytes(handle));
     }
     let direct: DirectRustCompiled = { bindings, handle };
+    if (bindings.rust_pickles_recorded_base_vk_envelope !== undefined) {
+      let envelope = JSON.parse(bindings.rust_pickles_recorded_base_vk_envelope(handle)) as {
+        base64: string;
+        hash: string;
+      };
+      direct.verificationKey = { data: envelope.base64, hash: envelope.hash };
+    }
     if (proofsVerified > 0) {
       // Prefer the proof-free donor template (no prover runs at compile time;
       // proven index-equivalent in pickles). Fall back to proving one.
@@ -1179,6 +1215,7 @@ async function compileRecordedEnvelope(
     directRust?: DirectRustCompiled;
   } = {
     ...recorded,
+    verificationKey: directRust?.verificationKey ?? minaRuntime?.verificationKey,
     minaRuntime,
     directRust,
     proveBaseCase: () => proveRecordedBaseCaseCompiled(compiled),
