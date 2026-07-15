@@ -131,29 +131,6 @@ O1JS_MINA_RUNTIME_PATH=/absolute/path/to/mina_runtime.node \
   ./run src/tests/mina-runtime.ts
 ```
 
-#### WebAssembly adapter (browser and node-wasm)
-
-Two one-command builds compile the `mina-runtime-wasm` crate from the submodule
-and run `wasm-bindgen`. Both need the nightly wasm toolchain and
-`wasm-bindgen-cli`; the submodule's `make setup-wasm` installs them.
-
-```sh
-npm run build:rust-backend-web        # browser ESM  -> native/mina-runtime-web
-npm run build:rust-backend-node-wasm  # Node CJS     -> @o1js/mina-runtime-node-wasm
-```
-
-`build:rust-backend-node-wasm` mirrors the NAPI build: it packages the artifact
-and installs it into `node_modules`, so a loader can
-`require('@o1js/mina-runtime-node-wasm')` and get `{ MinaRuntime, backendInfo }`
-(same JSON v1 wire protocol as the NAPI addon). The underlying build script
-takes `TARGET=web|nodejs` and honors `MINA_RUST_ROOT`.
-
-**Caveat:** o1js does not yet load these artifacts — `createMinaRuntime` (in
-`src/native/native.ts`) currently loads the NAPI addon. The wasm crate exposes a
-synchronous `execute` + `info`, but the transport interface also expects an
-`executeAsync`, so a loader must wrap `execute` (or run it in a worker). Wiring
-that loader is still TODO.
-
 The release gate runs the same N0 ZkProgram against both the jsoo reference and
 the mina-runtime backend in isolated processes and reports correctness, circuit
 shape, and verification-key parity (see
