@@ -1060,16 +1060,20 @@ async function compileRecordedProgram(
   }[],
   cache: Cache = Cache.FileSystemDefault
 ): Promise<RecordedCompiledCircuit[]> {
+  let profile = typeof process !== 'undefined' && process.env.O1JS_PROFILE_COMPILE !== undefined;
+  let tRecord = performance.now();
   let recorded: Awaited<ReturnType<typeof recordCircuit>>[] = [];
   for (let branch of branches) {
     recorded.push(await recordCircuit(branch.circuit, { validateWitness: false }));
   }
+  if (profile) console.error(`[o1js compile] recording: ${(performance.now() - tRecord).toFixed(0)}ms`);
   if (!useMinaRuntimeBackend()) {
     return Promise.all(
       recorded.map((entry, i) => compileRecordedEnvelope(entry, cache, branches[i].proofsVerified))
     );
   }
   let client = await minaRuntimeClient();
+  let tRust = performance.now();
   let compiled = client.compileProgram(
     recorded.map((entry, i) => ({
       circuit: entry.circuit,
@@ -1077,6 +1081,7 @@ async function compileRecordedProgram(
       proofsVerified: branches[i].proofsVerified,
     }))
   );
+  if (profile) console.error(`[o1js compile] rust compileProgram: ${(performance.now() - tRust).toFixed(0)}ms`);
   return Promise.all(
     recorded.map((entry, i) =>
       compileRecordedEnvelope(entry, cache, branches[i].proofsVerified, {

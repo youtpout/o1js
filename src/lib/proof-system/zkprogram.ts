@@ -524,7 +524,12 @@ function ZkProgram<
     doProving = proofsEnabled ?? doProving;
 
     if (doProving) {
+      let profileCompile =
+        typeof process !== 'undefined' && process.env.O1JS_PROFILE_COMPILE !== undefined;
+      let tAnalyze = performance.now();
       let methodsMeta = await analyzeMethods();
+      if (profileCompile)
+        console.error(`[o1js compile] analyzeMethods: ${(performance.now() - tAnalyze).toFixed(0)}ms`);
       let gates = methodKeys.map((k) => methodsMeta[k].gates);
       let proofs = methodKeys.map((k) => methodsMeta[k].proofs);
       maxProofsVerified = computeMaxProofsVerified(proofs.map((p) => p.length));
