@@ -66,6 +66,7 @@
     "build:jsoo:node": "./scripts/build/jsoo/build-node.sh",
     "build:native": "./scripts/build/native/build.sh",
     "build:rust-backend": "./scripts/build/native/build-mina-runtime.sh",
+    "build:rust-backend-web": "./scripts/build/native/build-mina-runtime-web.sh",
     "build:docs": "typedoc",
     "prepublish:web": "./scripts/prepublish/prepublish-web.sh",
     "prepublish:node": "./scripts/prepublish/prepublish-node.sh",

@@ -131,6 +131,23 @@ O1JS_MINA_RUNTIME_PATH=/absolute/path/to/mina_runtime.node \
   ./run src/tests/mina-runtime.ts
 ```
 
+#### WebAssembly adapter (browser)
+
+`build:rust-backend-web` builds the `mina-runtime-wasm` crate from the submodule
+and runs `wasm-bindgen` to emit a browser package under
+`native/mina-runtime-web`:
+
+```sh
+npm run build:rust-backend-web
+```
+
+It needs the nightly wasm toolchain and `wasm-bindgen-cli`; the submodule's
+`make setup-wasm` installs them. **Caveat:** o1js does not yet load this
+artifact in the browser — `createMinaRuntime` (in `src/native/native.ts`) is
+Node-only, so this command produces the wasm module but does not yet enable
+`setProofSystemBackend('rust')` in the browser. Wiring a Web Worker loader for
+it is still TODO.
+
 The release gate runs the same N0 ZkProgram against both the jsoo reference and
 the mina-runtime backend in isolated processes and reports correctness, circuit
 shape, and verification-key parity (see
