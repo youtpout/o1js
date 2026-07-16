@@ -192,6 +192,9 @@ type DirectRustCompiled = {
   n1Handle?: unknown;
   n2Handle?: unknown;
   verificationKey?: CanonicalVkEnvelope;
+  /** Shared-wrap program: every branch proves through ONE compiled program. */
+  program?: unknown;
+  branchIndex?: number;
 };
 
 type CanonicalVkEnvelope = { data: string; hash: string };
@@ -489,6 +492,28 @@ type RustPicklesBindings = {
   rust_pickles_compile_recorded_program?: (
     branchesJson: string
   ) => [unknown, unknown | null, unknown | null][];
+  rust_pickles_compile_recorded_program_shared?: (branchesJson: string) => unknown;
+  rust_pickles_recorded_program_vk_envelope?: (program: unknown) => string;
+  rust_pickles_program_prove_n0_bytes?: (
+    program: unknown,
+    branchIndex: number,
+    witness: Uint8Array
+  ) => unknown;
+  rust_pickles_program_prove_n1_bytes?: (
+    program: unknown,
+    branchIndex: number,
+    previous: unknown,
+    witness: Uint8Array
+  ) => unknown;
+  rust_pickles_program_prove_n2_bytes?: (
+    program: unknown,
+    branchIndex: number,
+    first: unknown,
+    second: unknown,
+    witness: Uint8Array
+  ) => unknown;
+  rust_pickles_recorded_program_n1_envelope?: (handle: unknown) => string;
+  rust_pickles_recorded_program_n2_envelope?: (handle: unknown) => string;
   rust_pickles_seed_lagrange_basis?: (curve: string, domainLog2: number, bytes: Uint8Array) => boolean;
   rust_pickles_export_lagrange_basis?: (curve: string, domainLog2: number) => Uint8Array;
   rust_pickles_prove_recorded_n2_over_base_handles?: (
@@ -688,7 +713,27 @@ async function proveRecordedBaseCaseCompiled(
     }
   }
   if (compiled.directRust !== undefined) {
-    let { bindings, handle } = compiled.directRust;
+    let { bindings, handle, program, branchIndex } = compiled.directRust;
+    if (program !== undefined) {
+      if (
+        !bindings.rust_pickles_program_prove_n0_bytes ||
+        !bindings.rust_pickles_recorded_base_envelope
+      ) {
+        throw Error('Rust Pickles bindings do not expose shared program proving.');
+      }
+      let proofHandle = await runRustPickles(() =>
+        bindings.rust_pickles_program_prove_n0_bytes!(
+          program,
+          branchIndex!,
+          fpWitnessToBytes(compiled.witness)
+        )
+      );
+      try {
+        return JSON.parse(bindings.rust_pickles_recorded_base_envelope(proofHandle));
+      } finally {
+        (proofHandle as { free?: () => void }).free?.();
+      }
+    }
     if (
       !bindings.rust_pickles_prove_recorded_base_keep_compiled ||
       !bindings.rust_pickles_recorded_base_envelope
@@ -740,7 +785,24 @@ async function proveRecordedBaseCaseKeepCompiled(
     }
   }
   if (compiled.directRust !== undefined) {
-    let { bindings, handle } = compiled.directRust;
+    let { bindings, handle, program, branchIndex } = compiled.directRust;
+    if (program !== undefined) {
+      if (
+        !bindings.rust_pickles_program_prove_n0_bytes ||
+        !bindings.rust_pickles_recorded_base_envelope
+      ) {
+        throw Error('Rust Pickles bindings do not expose shared program proving.');
+      }
+      let proofHandle = await runRustPickles(() =>
+        bindings.rust_pickles_program_prove_n0_bytes!(
+          program,
+          branchIndex!,
+          fpWitnessToBytes(compiled.witness)
+        )
+      );
+      let envelope = JSON.parse(bindings.rust_pickles_recorded_base_envelope(proofHandle));
+      return { handle: proofHandle, ...envelope };
+    }
     if (
       !bindings.rust_pickles_prove_recorded_base_keep_compiled ||
       !bindings.rust_pickles_recorded_base_envelope
@@ -790,6 +852,29 @@ async function proveRecordedN1OverCompiled(
       if (temporary) client.dropCircuit(circuitId);
     }
   }
+  let direct = (compiled as { directRust?: DirectRustCompiled }).directRust;
+  if (direct?.program !== undefined) {
+    let bindings = direct.bindings;
+    if (
+      !bindings.rust_pickles_program_prove_n1_bytes ||
+      !bindings.rust_pickles_recorded_program_n1_envelope
+    ) {
+      throw Error('Rust Pickles bindings do not expose shared program N1 proving.');
+    }
+    let handle = await runRustPickles(() =>
+      bindings.rust_pickles_program_prove_n1_bytes!(
+        direct.program,
+        direct.branchIndex!,
+        previous.handle,
+        fpWitnessToBytes(compiled.witness)
+      )
+    );
+    try {
+      return JSON.parse(bindings.rust_pickles_recorded_program_n1_envelope(handle));
+    } finally {
+      (handle as { free?: () => void }).free?.();
+    }
+  }
   let native = await rustPicklesBindings();
   if (!native.rust_pickles_prove_recorded_n1_over) {
     throw Error('@o1js/native does not expose rust_pickles_prove_recorded_n1_over — rebuild it.');
@@ -814,6 +899,26 @@ async function proveRecordedN1OverKeepCompiled(
 ): Promise<RecordedN1ProofHandle> {
   if (!isMinaRuntimeBaseHandle(previous.handle)) {
     let bindings = compiled.directRust?.bindings ?? (await rustPicklesBindings());
+    if (compiled.directRust?.program !== undefined) {
+      if (
+        !bindings.rust_pickles_program_prove_n1_bytes ||
+        !bindings.rust_pickles_recorded_program_n1_envelope
+      ) {
+        throw Error('Rust Pickles bindings do not expose shared program N1 proving.');
+      }
+      let handle = await runRustPickles(() =>
+        bindings.rust_pickles_program_prove_n1_bytes!(
+          compiled.directRust!.program,
+          compiled.directRust!.branchIndex!,
+          previous.handle,
+          fpWitnessToBytes(compiled.witness)
+        )
+      );
+      return {
+        handle,
+        ...JSON.parse(bindings.rust_pickles_recorded_program_n1_envelope(handle)),
+      };
+    }
     if (
       !bindings.rust_pickles_compile_recorded_n1 ||
       !bindings.rust_pickles_prove_recorded_n1_compiled_keep ||
@@ -890,6 +995,28 @@ async function proveRecordedN2OverCompiled(
 ): Promise<RecordedN2ProofResult> {
   if (!isMinaRuntimeBaseHandle(first.handle) && !isMinaRuntimeBaseHandle(second.handle)) {
     let bindings = compiled.directRust?.bindings ?? (await rustPicklesBindings());
+    if (compiled.directRust?.program !== undefined) {
+      if (
+        !bindings.rust_pickles_program_prove_n2_bytes ||
+        !bindings.rust_pickles_recorded_program_n2_envelope
+      ) {
+        throw Error('Rust Pickles bindings do not expose shared program N2 proving.');
+      }
+      let handle = await runRustPickles(() =>
+        bindings.rust_pickles_program_prove_n2_bytes!(
+          compiled.directRust!.program,
+          compiled.directRust!.branchIndex!,
+          first.handle,
+          second.handle,
+          fpWitnessToBytes(compiled.witness)
+        )
+      );
+      try {
+        return JSON.parse(bindings.rust_pickles_recorded_program_n2_envelope(handle));
+      } finally {
+        (handle as { free?: () => void }).free?.();
+      }
+    }
     if (
       compiled.directRust?.n2Handle !== undefined &&
       bindings.rust_pickles_prove_recorded_n2_compiled_bytes
@@ -1131,6 +1258,56 @@ async function compileRecordedProgram(
   if (!useMinaRuntimeBackend()) {
     let bindings = await rustPicklesBindings();
     await seedLagrangeCaches(bindings);
+    let hasRecursion = branches.some((branch) => branch.proofsVerified > 0);
+    if (hasRecursion && bindings.rust_pickles_compile_recorded_program_shared !== undefined) {
+      // OCaml `Pickles.compile` shape: ONE shared wrap circuit and canonical
+      // verification key for the whole program. Programs without recursion
+      // keep the width-0 per-branch path, whose wrap (2^13) is already
+      // bit-identical to jsoo's.
+      let branchesJson = JSON.stringify(
+        recorded.map((entry, i) => ({
+          circuit: entry.circuit,
+          witness: entry.witness,
+          proofsVerified: branches[i].proofsVerified,
+        }))
+      );
+      let debugStage =
+        typeof process !== 'undefined' ? process.env.O1JS_DEBUG_PROGRAM_STAGE : undefined;
+      if (debugStage !== undefined) {
+        let bisect = (
+          bindings as unknown as {
+            rust_pickles_debug_program_stage?: (json: string, stage: number) => string;
+          }
+        ).rust_pickles_debug_program_stage;
+        if (bisect === undefined) throw Error('debug bindings missing');
+        let report = await runRustPickles(() => bisect(branchesJson, Number(debugStage)));
+        console.error(`[program-debug] ${report}`);
+        throw Error(`program compile debug stage ${debugStage} done`);
+      }
+      let program = await runRustPickles(() =>
+        bindings.rust_pickles_compile_recorded_program_shared!(branchesJson)
+      );
+      if (profile) console.error(`[o1js compile] rust shared program compile done`);
+      let verificationKey: CanonicalVkEnvelope | undefined;
+      if (bindings.rust_pickles_recorded_program_vk_envelope !== undefined) {
+        let envelope = JSON.parse(
+          bindings.rust_pickles_recorded_program_vk_envelope(program)
+        ) as { base64: string; hash: string };
+        verificationKey = { data: envelope.base64, hash: envelope.hash };
+      }
+      await persistLagrangeCaches(bindings);
+      return Promise.all(
+        recorded.map((entry, i) =>
+          compileRecordedEnvelope(entry, cache, branches[i].proofsVerified, undefined, {
+            bindings,
+            handle: undefined,
+            program,
+            branchIndex: i,
+            verificationKey,
+          })
+        )
+      );
+    }
     if (bindings.rust_pickles_compile_recorded_program !== undefined) {
       // One call compiling every branch in parallel inside the rayon pool —
       // per-method calls serialize across the wasm boundary.
@@ -1203,6 +1380,7 @@ async function compileRecordedEnvelope(
     directRust = precompiledDirect;
     if (
       directRust.verificationKey === undefined &&
+      directRust.handle !== undefined &&
       directRust.bindings.rust_pickles_recorded_base_vk_envelope !== undefined
     ) {
       let envelope = JSON.parse(

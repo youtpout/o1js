@@ -554,13 +554,19 @@ function ZkProgram<
           cache
         );
         methodKeys.forEach((key, i) => rustCompiledMethods.set(key, compiledBranches[i]));
-        // Single-method non-recursive programs: the circuit's wrap VK is THE
-        // program VK, and with the wrap circuit at gate-level parity it is
-        // bit-identical to what jsoo's Pickles returns (canonical side-loaded
-        // base64 + Mina account hash). Multi-method / recursive programs
-        // still use the interim envelope until the shared program wrap lands.
+        // The rust backend compiles ONE shared wrap per program (OCaml
+        // `Pickles.compile` shape): every branch reports the same canonical
+        // side-loaded VK, which is THE program VK. Single-method
+        // non-recursive programs are the width-0 special case that is
+        // already bit-identical to jsoo.
         let canonicalVk =
-          methodKeys.length === 1 && maxProofsVerified === 0
+          compiledBranches.length > 0 &&
+          compiledBranches.every(
+            (branch) =>
+              branch.verificationKey !== undefined &&
+              branch.verificationKey.data === compiledBranches[0].verificationKey!.data &&
+              branch.verificationKey.hash === compiledBranches[0].verificationKey!.hash
+          )
             ? compiledBranches[0].verificationKey
             : undefined;
         if (canonicalVk !== undefined) {

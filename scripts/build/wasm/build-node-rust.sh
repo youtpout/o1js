@@ -58,6 +58,22 @@ make -C "$PROOF_SYSTEMS_ROOT" build-nodejs \
   NIGHTLY_RUST_VERSION="$NIGHTLY" \
   KIMCHI_WASM_NODEJS_OUTDIR="$BUILT_PATH"
 
+# Compile-time detection of std APIs that PANIC at runtime on
+# wasm32-unknown-unknown (std::time::Instant/SystemTime): their panic
+# message is baked into the binary, so a build-time scan catches them
+# before they hang the wasm pool at runtime.
+info "scanning wasm for unsupported-std panic strings..."
+if strings "$BUILT_PATH/kimchi_wasm_bg.wasm" | grep -q "time not implemented on this platform"; then
+  echo "ERROR: the wasm binary contains std::time::Instant/SystemTime calls."
+  echo "These panic at runtime on wasm32 (silent thread-pool deadlock)."
+  echo "Route them through snarky::wasm_instant instead."
+  exit 1
+fi
+UNSUPPORTED_COUNT=$(strings "$BUILT_PATH/kimchi_wasm_bg.wasm" | grep -c "operation not supported on this platform" || true)
+if [ "$UNSUPPORTED_COUNT" -gt 0 ]; then
+  info "note: $UNSUPPORTED_COUNT 'operation not supported' strings (fs/env fallbacks — fine if handled as Err, fatal if unwrapped)"
+fi
+
 info "copying artifacts into the right place..."
 for target in "${TARGETS[@]}"; do
   cp $BUILT_PATH/$target $BINDINGS_PATH/$target
