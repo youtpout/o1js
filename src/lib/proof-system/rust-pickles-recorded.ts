@@ -906,6 +906,33 @@ async function proveRecordedN1OverKeepCompiled(
       ) {
         throw Error('Rust Pickles bindings do not expose shared program N1 proving.');
       }
+      let debugN1 =
+        typeof process !== 'undefined' ? process.env.O1JS_DEBUG_N1_STAGE : undefined;
+      if (debugN1 !== undefined) {
+        let bisect = (
+          bindings as unknown as {
+            rust_pickles_program_debug_prove_n1?: (
+              program: unknown,
+              b: number,
+              prev: unknown,
+              w: Uint8Array,
+              stage: number
+            ) => string;
+          }
+        ).rust_pickles_program_debug_prove_n1;
+        if (bisect === undefined) throw Error('n1 debug bindings missing');
+        let report = await runRustPickles(() =>
+          bisect(
+            compiled.directRust!.program,
+            compiled.directRust!.branchIndex!,
+            previous.handle,
+            fpWitnessToBytes(compiled.witness),
+            Number(debugN1)
+          )
+        );
+        console.error(`[n1-debug] ${report}`);
+        throw Error('n1 prove debug done');
+      }
       let handle = await runRustPickles(() =>
         bindings.rust_pickles_program_prove_n1_bytes!(
           compiled.directRust!.program,
@@ -1271,6 +1298,20 @@ async function compileRecordedProgram(
           proofsVerified: branches[i].proofsVerified,
         }))
       );
+      let debugProbe =
+        typeof process !== 'undefined' ? process.env.O1JS_DEBUG_PROBE : undefined;
+      if (debugProbe !== undefined) {
+        let [branchIndex, mode] = debugProbe.split(',').map(Number);
+        let probe = (
+          bindings as unknown as {
+            rust_pickles_debug_probe_branch?: (json: string, b: number, m: number) => string;
+          }
+        ).rust_pickles_debug_probe_branch;
+        if (probe === undefined) throw Error('probe debug bindings missing');
+        let report = await runRustPickles(() => probe(branchesJson, branchIndex, mode));
+        console.error(`[probe-debug] branch ${branchIndex} ${report}`);
+        throw Error(`probe debug done`);
+      }
       let debugStage =
         typeof process !== 'undefined' ? process.env.O1JS_DEBUG_PROGRAM_STAGE : undefined;
       if (debugStage !== undefined) {
@@ -1531,8 +1572,12 @@ async function compileRecordedEnvelope(
       if (compiled.directRust !== undefined) {
         (compiled.directRust.n1Handle as { free?: () => void } | undefined)?.free?.();
         (compiled.directRust.n2Handle as { free?: () => void } | undefined)?.free?.();
-        let disposable = compiled.directRust.handle as { free?: () => void };
-        disposable.free?.();
+        (compiled.directRust.handle as { free?: () => void } | undefined)?.free?.();
+        // Shared-wrap program handles are owned by the first branch only:
+        // free once, the other branches see it already cleared.
+        if (compiled.directRust.branchIndex === 0) {
+          (compiled.directRust.program as { free?: () => void } | undefined)?.free?.();
+        }
         compiled.directRust = undefined;
       }
     },

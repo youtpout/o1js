@@ -54,8 +54,28 @@ globalThis.startWorkers = startWorkers;
 globalThis.terminateWorkers = terminateWorkers;
 
 if (!isMainThread) {
-  parentPort.postMessage({ type: 'wasm_bindgen_worker_ready' });
-  wasm.wbg_rayon_start_worker(workerData.receiver);
+  if (workerData?.type === 'o1js-wasm-tracer') {
+    // Debug tracer: polls the wasm live-trace ring over the SHARED memory and
+    // prints straight to the inherited stdout fd — visible even while the
+    // main thread is blocked inside a wasm call.
+    parentPort.postMessage({ type: 'wasm_bindgen_worker_ready' });
+    const fsSync = require('node:fs');
+    setInterval(() => {
+      try {
+        let trace = wasm.rust_pickles_debug_take_trace?.();
+        if (trace) {
+          // fs.writeSync(1): straight to the inherited stdout fd — worker
+          // console.log would be forwarded through the (blocked) parent.
+          for (let line of trace.split('\n')) fsSync.writeSync(1, `[wasm-trace] ${line}\n`);
+        }
+      } catch (error) {
+        fsSync.writeSync(1, `[wasm-trace] tracer error: ${error?.message}\n`);
+      }
+    }, 1000);
+  } else {
+    parentPort.postMessage({ type: 'wasm_bindgen_worker_ready' });
+    wasm.wbg_rayon_start_worker(workerData.receiver);
+  }
 }
 
 // state machine to enable calling multiple functions that need a thread pool at once
@@ -102,6 +122,13 @@ async function startWorkers(src, memory, builder) {
   wasmWorkers = [];
   const startupTimeoutMs = 30_000;
   let workerMemory = getWorkerMemory();
+  if (process.env.O1JS_WASM_TRACER !== undefined) {
+    let tracer = new Worker(src, {
+      workerData: { type: 'o1js-wasm-tracer', memory: workerMemory },
+    });
+    tracer.unref();
+    wasmWorkers.push(tracer);
+  }
   await Promise.all(
     Array.from({ length: builder.numThreads() }, () => {
       let worker = new Worker(src, {
