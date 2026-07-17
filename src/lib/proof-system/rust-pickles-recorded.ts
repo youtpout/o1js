@@ -24,6 +24,9 @@ import {
   type RustProofResponse,
 } from '../mina-runtime/backend.js';
 import { FieldConst, FieldType, FieldVar } from '../provable/core/fieldvar.js';
+import { existsOne } from '../provable/core/exists.js';
+import { Fp } from '../../bindings/crypto/finite-field.js';
+import { poseidonParamsKimchiFp } from '../../bindings/crypto/constants.js';
 import { snarkContext } from '../provable/core/provable-context.js';
 import type { Field } from '../provable/field.js';
 import { Cache, readCache, withVersion, writeCache, type CacheHeader } from './cache.js';
@@ -384,6 +387,104 @@ async function recordCircuit(
     });
     return original.poseidon.call(gates, state);
   };
+
+  // `Poseidon.hash`/`hashWithPrefix` go through `Snarky.poseidon.update`,
+  // whose gate emission happens INSIDE OCaml — invisible to the
+  // `gates.poseidon` hook above. Record the permutation ourselves: witness
+  // every round state (as OCaml `block_cipher` does) and emit the recorded
+  // `poseidon` constraint; the kimchi layout chunks the 55 pre-round states
+  // into 11 Poseidon rows plus the final Zero output row
+  // (snarky constraint_system.rs Poseidon2).
+  let poseidonApi = Snarky.poseidon as {
+    update: (state: unknown, input: unknown) => unknown;
+    hashToGroup: (input: unknown) => unknown;
+    sponge: {
+      create: (isChecked: unknown) => unknown;
+      absorb: (sponge: unknown, x: unknown) => unknown;
+      squeeze: (sponge: unknown) => unknown;
+    };
+  };
+  let originalPoseidon = {
+    update: poseidonApi.update,
+    hashToGroup: poseidonApi.hashToGroup,
+    spongeCreate: poseidonApi.sponge.create,
+    spongeAbsorb: poseidonApi.sponge.absorb,
+    spongeSqueeze: poseidonApi.sponge.squeeze,
+  };
+  const POSEIDON_RATE = 2;
+  let poseidonRc = poseidonParamsKimchiFp.roundConstants.map((row) => row.map(BigInt));
+  let poseidonMds = poseidonParamsKimchiFp.mds.map((row) => row.map(BigInt));
+  let poseidonRounds = poseidonParamsKimchiFp.fullRounds;
+  let readVarBigint = (x: FieldVar): bigint => {
+    let value: bigint | undefined;
+    Snarky.run.asProver(() => {
+      value = FieldConst.toBigint(Snarky.field.readVar(x));
+    });
+    if (value === undefined) {
+      throw Error('Rust Pickles recorder: could not read a poseidon input value');
+    }
+    return value;
+  };
+  let poseidonSbox = (x: bigint) => {
+    let x2 = Fp.mul(x, x);
+    let x4 = Fp.mul(x2, x2);
+    return Fp.mul(Fp.mul(x4, x2), x);
+  };
+  let recordPermutation = (state: FieldVar[]): FieldVar[] => {
+    let values = state.map(readVarBigint);
+    let stateRows = [state.map((x) => recorder.lc(x))];
+    let current = values;
+    let outVars: FieldVar[] = [];
+    for (let round = 0; round < poseidonRounds; round++) {
+      let old = current.map(poseidonSbox);
+      current = poseidonMds.map((row, i) =>
+        Fp.add(
+          row.reduce((acc, m, j) => Fp.add(acc, Fp.mul(m, old[j])), 0n),
+          poseidonRc[round][i]
+        )
+      );
+      let snapshot = current;
+      let vars = snapshot.map((v) => existsOne(() => v).value as FieldVar);
+      if (round < poseidonRounds - 1) stateRows.push(vars.map((x) => recorder.lc(x)));
+      else outVars = vars;
+    }
+    recorder.constraints.push({
+      kind: 'poseidon',
+      states: stateRows,
+      last: outVars.map((x) => recorder.lc(x)),
+    });
+    return outVars;
+  };
+  poseidonApi.update = (mlState: unknown, mlInput: unknown) => {
+    let state = fieldVarsFromMlArray('poseidon.update.state', mlState, 3);
+    let input = fieldVarsFromMlArray('poseidon.update.input', mlInput);
+    if (input.length === 0) {
+      state = recordPermutation(state);
+    } else {
+      let padded = input.slice();
+      while (padded.length % POSEIDON_RATE !== 0) padded.push(FieldVar.constant(0n));
+      for (let block = 0; block < padded.length; block += POSEIDON_RATE) {
+        for (let i = 0; i < POSEIDON_RATE; i++) {
+          state[i] = FieldVar.add(state[i], padded[block + i]);
+        }
+        state = recordPermutation(state);
+      }
+    }
+    return [0, ...state];
+  };
+  poseidonApi.hashToGroup = () => {
+    throw Error('Rust Pickles recorder: Poseidon.hashToGroup is not supported yet');
+  };
+  poseidonApi.sponge.create = () => {
+    throw Error('Rust Pickles recorder: Poseidon.Sponge is not supported yet');
+  };
+  poseidonApi.sponge.absorb = () => {
+    throw Error('Rust Pickles recorder: Poseidon.Sponge is not supported yet');
+  };
+  poseidonApi.sponge.squeeze = () => {
+    throw Error('Rust Pickles recorder: Poseidon.Sponge is not supported yet');
+  };
+
   gates.ecAdd = (p1, p2, p3, inf, same_x, slope, inf_z, x21_inv) => {
     let [p1x, p1y] = fieldVarsFromMlTuple('ecAdd.p1', p1, 2);
     let [p2x, p2y] = fieldVarsFromMlTuple('ecAdd.p2', p2, 2);
@@ -456,6 +557,11 @@ async function recordCircuit(
     field.assertBoolean = original.assertBoolean;
     gates.generic = original.generic;
     gates.poseidon = original.poseidon;
+    poseidonApi.update = originalPoseidon.update;
+    poseidonApi.hashToGroup = originalPoseidon.hashToGroup;
+    poseidonApi.sponge.create = originalPoseidon.spongeCreate;
+    poseidonApi.sponge.absorb = originalPoseidon.spongeAbsorb;
+    poseidonApi.sponge.squeeze = originalPoseidon.spongeSqueeze;
     gates.ecAdd = original.ecAdd;
     gates.rangeCheck0 = original.rangeCheck0;
     gates.rangeCheck1 = original.rangeCheck1;

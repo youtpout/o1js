@@ -637,7 +637,7 @@ class SmartContract extends SmartContractBase {
             // The @method wrapper only takes its in-circuit branch (fresh
             // account update, fetchMode 'test', dummy state) under
             // inCompile/inProver/inAnalyze — flag the recording as analyze.
-            let snarkId = snarkContext.enter({ inAnalyze: true });
+            let snarkId = snarkContext.enter({ inAnalyze: true, inCheckedComputation: true });
             try {
               let finalArgs = intf.args.map((type) =>
                 Provable.witness(type, () => ProvableType.synthesize(type))
