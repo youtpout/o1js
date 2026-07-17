@@ -21,8 +21,11 @@ const Program = ZkProgram({
 });
 
 let { verificationKey } = await Program.compile({ cache: Cache.None });
-if (!verificationKey.data.startsWith('mina-runtime-v1:')) {
-  throw Error('regular compile did not return a mina-runtime verification key');
+// The rust compile path now returns the CANONICAL side-loaded VK envelope
+// when the shared-program pipeline provides one; the legacy
+// 'mina-runtime-v1:' JSON envelope remains as a fallback.
+if (verificationKey.data.length === 0) {
+  throw Error('regular compile did not return a verification key');
 }
 
 let { proof } = await Program.multiply(Field(4), Field(5));

@@ -42,6 +42,12 @@ import {
   MethodInterface,
   sortMethodArguments,
 } from '../../proof-system/zkprogram.js';
+import { getProofSystemBackend } from '../../backend.js';
+import { compileRecordedProgram } from '../../proof-system/rust-pickles-recorded.js';
+import { ZkProgramContext } from '../../proof-system/zkprogram-context.js';
+import { extractProofs } from '../../proof-system/proof.js';
+import { activeInstance, setActiveInstance } from './mina-instance.js';
+import { newAccount } from './account.js';
 import { VerificationKey } from '../../proof-system/verification-key.js';
 import { Proof, ProofClass } from '../../proof-system/proof.js';
 import { PublicKey } from '../../provable/crypto/signature.js';
@@ -56,6 +62,7 @@ import {
   inCheckedComputation,
   inCompile,
   inProver,
+  snarkContext,
 } from '../../provable/core/provable-context.js';
 import { Cache } from '../../proof-system/cache.js';
 import { assert } from '../../provable/gadgets/common.js';
@@ -595,6 +602,93 @@ class SmartContract extends SmartContractBase {
     let methodsMeta = await this.analyzeMethods();
     let gates = methodKeys.map((k) => methodsMeta[k].gates);
     let proofs = methodKeys.map((k) => methodsMeta[k].proofs);
+
+    if (getProofSystemBackend() === 'rust') {
+      // Rust backend, compile-only milestone: record each method circuit
+      // (the account-update logic runs like any provable code) and extract
+      // the canonical side-loaded VK — the on-chain zkApp key. Proving
+      // transactions over this path is not wired yet.
+      //
+      // Unlike jsoo compile, the recorder EXECUTES witness computations, so
+      // state reads hit `Mina.getAccount`. Install an ephemeral instance
+      // that serves fresh dummy accounts (non-zkapp accounts read as
+      // all-zero state) for the duration of the recording.
+      let previousInstance = activeInstance;
+      setActiveInstance({
+        ...previousInstance,
+        getAccount(publicKey, tokenId) {
+          return newAccount({ publicKey, tokenId });
+        },
+      });
+      let compiledBranches;
+      try {
+        compiledBranches = await compileRecordedProgramForZkapp();
+      } finally {
+        setActiveInstance(previousInstance);
+      }
+      async function compileRecordedProgramForZkapp() {
+        return compileRecordedProgram(
+        methodIntfs.map((intf, i) => ({
+          circuit: async () => {
+            let publicInput = Provable.witness(ZkappPublicInput, () =>
+              ProvableType.synthesize(ZkappPublicInput)
+            );
+            let id = ZkProgramContext.enter();
+            // The @method wrapper only takes its in-circuit branch (fresh
+            // account update, fetchMode 'test', dummy state) under
+            // inCompile/inProver/inAnalyze — flag the recording as analyze.
+            let snarkId = snarkContext.enter({ inAnalyze: true });
+            try {
+              let finalArgs = intf.args.map((type) =>
+                Provable.witness(type, () => ProvableType.synthesize(type))
+              );
+              finalArgs.forEach((value) =>
+                extractProofs(value).forEach((proof) => proof.declare())
+              );
+              await methods[i](publicInput, ...(finalArgs as [PublicKey, Field, ...unknown[]]));
+            } finally {
+              snarkContext.leave(snarkId);
+              ZkProgramContext.leave(id);
+            }
+            // statement = ZkappPublicInput (the output type is Empty)
+            return ZkappPublicInput.toFields(publicInput);
+          },
+          proofsVerified: proofs[i].length as 0 | 1 | 2,
+        })),
+        cache
+        );
+      }
+      let canonicalVk =
+        compiledBranches.length > 0 &&
+        compiledBranches.every(
+          (branch) =>
+            branch.verificationKey !== undefined &&
+            branch.verificationKey.data === compiledBranches[0].verificationKey!.data &&
+            branch.verificationKey.hash === compiledBranches[0].verificationKey!.hash
+        )
+          ? compiledBranches[0].verificationKey
+          : undefined;
+      for (let branch of compiledBranches) branch.dispose?.();
+      if (canonicalVk === undefined) {
+        throw Error(
+          'rust backend: SmartContract.compile did not produce a canonical verification key'
+        );
+      }
+      let verificationKey = new VerificationKey({
+        data: canonicalVk.data,
+        hash: Field(BigInt(canonicalVk.hash)),
+      });
+      this._verificationKey = verificationKey;
+      let verify = async () => {
+        throw Error('rust backend: zkApp proof verification is not wired yet');
+      };
+      let provers = methods.map(() => async () => {
+        throw Error('rust backend: zkApp transaction proving is not wired yet');
+      });
+      this._provers = provers as any;
+      return { verificationKey, provers: provers as any, verify: verify as any };
+    }
+
     let { verificationKey, provers, verify } = await compileProgram({
       publicInputType: ZkappPublicInput,
       publicOutputType: Empty,
@@ -1256,6 +1350,13 @@ const ProofAuthorization = {
     let hash = Provable.witness(Field, () => {
       let proverData = zkAppProver.getData();
       let isProver = proverData !== undefined;
+      if (!isProver && priorAccountUpdates === undefined && inAnalyze()) {
+        // An analyze/recording pass executes witness computations with dummy
+        // values (the rust recorder does; jsoo compile skips them). There is
+        // no transaction to look a prior VK hash up in — use the same
+        // fallback as an absent account.
+        return Field(0);
+      }
       assert(
         isProver || priorAccountUpdates !== undefined,
         'Called `setKind()` outside the prover without passing in `priorAccountUpdates`.'

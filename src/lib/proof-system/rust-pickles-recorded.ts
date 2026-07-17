@@ -1282,6 +1282,22 @@ async function compileRecordedProgram(
     recorded.push(await recordCircuit(branch.circuit, { validateWitness: false }));
   }
   if (profile) console.error(`[o1js compile] recording: ${(performance.now() - tRecord).toFixed(0)}ms`);
+  let branchDump =
+    typeof process !== 'undefined' ? process.env.O1JS_DUMP_PROGRAM_BRANCHES : undefined;
+  if (branchDump !== undefined) {
+    let { writeFileSync } = await import('node:fs');
+    writeFileSync(
+      branchDump,
+      JSON.stringify(
+        recorded.map((entry, i) => ({
+          circuit: entry.circuit,
+          witness: entry.witness,
+          proofsVerified: branches[i].proofsVerified,
+        }))
+      )
+    );
+    console.error(`[o1js compile] program branches dumped to ${branchDump}`);
+  }
   if (!useMinaRuntimeBackend()) {
     let bindings = await rustPicklesBindings();
     await seedLagrangeCaches(bindings);
@@ -1376,6 +1392,16 @@ async function compileRecordedProgram(
         })
       );
     }
+    return Promise.all(
+      recorded.map((entry, i) => compileRecordedEnvelope(entry, cache, branches[i].proofsVerified))
+    );
+  }
+  // OCaml `Pickles.compile` gives an all-N0 program the width-0 wrap
+  // (2^13, maxProofsVerified = 0). The shared program pipeline bootstraps
+  // width-2 machinery and reports a wider wrap, so route non-recursive
+  // programs through the per-branch width-0 path — the same rule the
+  // non-runtime branch above applies.
+  if (!branches.some((branch) => branch.proofsVerified > 0)) {
     return Promise.all(
       recorded.map((entry, i) => compileRecordedEnvelope(entry, cache, branches[i].proofsVerified))
     );
