@@ -395,6 +395,29 @@ async function recordCircuit(
   // `poseidon` constraint; the kimchi layout chunks the 55 pre-round states
   // into 11 Poseidon rows plus the final Zero output row
   // (snarky constraint_system.rs Poseidon2).
+  // Dense witness indices must follow ALLOCATION order (jsoo variable
+  // order), not first-appearance-in-a-constraint order: `reduce_lincom`
+  // sorts terms by variable index, so a var witnessed early but constrained
+  // late would otherwise land in the wrong operand slot (observed as
+  // swapped l/r in the sponge absorb adds). Register every fresh var at
+  // allocation.
+  let run = Snarky.run as unknown as {
+    enterAsProver: (size: number) => (values: unknown) => unknown;
+  };
+  let originalEnterAsProver = run.enterAsProver;
+  run.enterAsProver = (size: number) => {
+    let finish = originalEnterAsProver.call(run, size);
+    return (values: unknown) => {
+      let fieldVars = finish(values);
+      for (let v of mlArrayToArray<FieldVar>(
+        fieldVars as { length: number; [index: number]: FieldVar }
+      )) {
+        recorder.lc(v);
+      }
+      return fieldVars;
+    };
+  };
+
   let poseidonApi = Snarky.poseidon as {
     update: (state: unknown, input: unknown) => unknown;
     hashToGroup: (input: unknown) => unknown;
@@ -557,6 +580,7 @@ async function recordCircuit(
     field.assertBoolean = original.assertBoolean;
     gates.generic = original.generic;
     gates.poseidon = original.poseidon;
+    run.enterAsProver = originalEnterAsProver;
     poseidonApi.update = originalPoseidon.update;
     poseidonApi.hashToGroup = originalPoseidon.hashToGroup;
     poseidonApi.sponge.create = originalPoseidon.spongeCreate;
