@@ -602,6 +602,7 @@ class SmartContract extends SmartContractBase {
     let methodsMeta = await this.analyzeMethods();
     let gates = methodKeys.map((k) => methodsMeta[k].gates);
     let proofs = methodKeys.map((k) => methodsMeta[k].proofs);
+    let maxProofsVerified = computeMaxProofsVerified(proofs.map((p) => p.length));
 
     if (getProofSystemBackend() === 'rust') {
       // Rust backend, compile-only milestone: record each method circuit
@@ -654,6 +655,13 @@ class SmartContract extends SmartContractBase {
             return ZkappPublicInput.toFields(publicInput);
           },
           proofsVerified: proofs[i].length as 0 | 1 | 2,
+          // OCaml per-tag max_proofs_verified (DynamicProof bound, or this
+          // contract's own width for Self/regular proofs).
+          previousProofWidths: proofs[i].map((P) =>
+            typeof (P as unknown as { maxProofsVerified?: number }).maxProofsVerified === 'number'
+              ? ((P as unknown as { maxProofsVerified: number }).maxProofsVerified as number)
+              : maxProofsVerified
+          ),
         })),
         cache
         );

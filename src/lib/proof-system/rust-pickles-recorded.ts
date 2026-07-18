@@ -112,6 +112,10 @@ type RecordedCircuitJson = {
    * these bindings to reuse the pre-witnessed statement vars instead of
    * allocating value-equal copies (which would split permutation classes). */
   previous_state_slots: [number, number][];
+  /** Per previous proof (logical order), the verified proof's own program
+   * width — OCaml's per-tag `max_proofs_verified` (a DynamicProof's declared
+   * bound, a SelfProof's own program width). */
+  previous_proof_widths?: number[];
 };
 
 type RecordedProofResult = {
@@ -1453,6 +1457,7 @@ async function compileRecordedProgram(
   branches: {
     circuit: () => Field[] | Promise<Field[]>;
     proofsVerified: 0 | 1 | 2;
+    previousProofWidths?: number[];
   }[],
   cache: Cache = Cache.FileSystemDefault
 ): Promise<RecordedCompiledCircuit[]> {
@@ -1460,7 +1465,9 @@ async function compileRecordedProgram(
   let tRecord = performance.now();
   let recorded: Awaited<ReturnType<typeof recordCircuit>>[] = [];
   for (let branch of branches) {
-    recorded.push(await recordCircuit(branch.circuit, { validateWitness: false }));
+    let entry = await recordCircuit(branch.circuit, { validateWitness: false });
+    entry.circuit.previous_proof_widths = branch.previousProofWidths ?? [];
+    recorded.push(entry);
   }
   if (profile) console.error(`[o1js compile] recording: ${(performance.now() - tRecord).toFixed(0)}ms`);
   let branchDump =

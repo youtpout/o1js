@@ -557,6 +557,14 @@ function ZkProgram<
             return {
               circuit: () => rustPicklesOutputFieldsForMethod(key, inputArgs as any, true),
               proofsVerified: proofs[i].length as 0 | 1 | 2,
+              // OCaml per-tag max_proofs_verified: a DynamicProof carries its
+              // declared bound; a SelfProof is this program's own width.
+              previousProofWidths: proofs[i].map((P) =>
+                typeof (P as unknown as { maxProofsVerified?: number }).maxProofsVerified ===
+                'number'
+                  ? ((P as unknown as { maxProofsVerified: number }).maxProofsVerified as number)
+                  : maxProofsVerified!
+              ),
             };
           }),
           cache
