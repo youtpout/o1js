@@ -33,6 +33,7 @@ import { Cache, readCache, withVersion, writeCache, type CacheHeader } from './c
 
 export {
   compileRecorded,
+  declareRecordedPreviousState,
   compileRecordedN1Over,
   compileRecordedProgram,
   proveRecordedBaseCase,
@@ -105,6 +106,12 @@ type RecordedCircuitJson = {
   aux_count: number;
   output: RecordedLinCombJson[];
   constraints: RecordedConstraintJson[];
+  /** `[denseIndex, prevStateFlatIndex]` pairs binding auxiliary slots to the
+   * previous proofs' statement fields. OCaml hands the SAME cvars to the
+   * rule's main and to the verification machinery; the Rust replay uses
+   * these bindings to reuse the pre-witnessed statement vars instead of
+   * allocating value-equal copies (which would split permutation classes). */
+  previous_state_slots: [number, number][];
 };
 
 type RecordedProofResult = {
@@ -307,8 +314,22 @@ class CircuitRecorder {
       aux_count: this.witness.length,
       output,
       constraints: this.constraints,
+      previous_state_slots: [],
     };
   }
+}
+
+let recordedPreviousStateFields: Field[] | undefined;
+
+/**
+ * Declares the previous proofs' statement fields (flattened, in proof order)
+ * for the recording in progress. The recorder translates their variable ids
+ * into dense auxiliary indices and emits them as `previous_state_slots`, so
+ * the Rust replay can bind those slots to the machinery's pre-witnessed
+ * statement vars — OCaml passes the same cvars to the rule's main.
+ */
+function declareRecordedPreviousState(fields: Field[]) {
+  recordedPreviousStateFields = fields;
 }
 
 /**
@@ -322,6 +343,7 @@ async function recordCircuit(
 ): Promise<{ circuit: RecordedCircuitJson; witness: string[] }> {
   await initializeBindings();
   let recorder = new CircuitRecorder();
+  recordedPreviousStateFields = undefined;
 
   let field = Snarky.field;
   let gates = Snarky.gates;
@@ -571,7 +593,17 @@ async function recordCircuit(
     let outputs = await f();
     let output = outputs.map((x) => recorder.lc(x.value));
     finish();
-    return { circuit: recorder.circuit(output), witness: recorder.witness };
+    let previous_state_slots: [number, number][] = [];
+    ((recordedPreviousStateFields as Field[] | undefined) ?? []).forEach((field, flat) => {
+      let value = field.value;
+      if (value[0] !== FieldType.Var) return;
+      let dense = recorder.varIndex.get(value[1]);
+      if (dense !== undefined) previous_state_slots.push([dense, flat]);
+    });
+    recordedPreviousStateFields = undefined;
+    let circuit = recorder.circuit(output);
+    circuit.previous_state_slots = previous_state_slots;
+    return { circuit, witness: recorder.witness };
   } finally {
     snarkContext.leave(id);
     field.assertEqual = original.assertEqual;

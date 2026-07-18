@@ -49,6 +49,7 @@ import {
   proveRecordedN1,
   proveRecordedN1Over,
   proveRecordedN2,
+  declareRecordedPreviousState,
   recordCircuit,
   releaseRecordedBaseProofHandle,
   verifyRecordedBaseCase,
@@ -854,10 +855,22 @@ function ZkProgram<
     }
     let id = ZkProgramContext.enter();
     try {
+      let previousStatementFields: Field[] = [];
       let args = zip(privateInputValues, privateInputTypes[methodIndex]).map(([arg, type], i) => {
         try {
           let value = Provable.witness(type, () => arg);
-          extractProofs(value).forEach((proof) => proof.declare());
+          extractProofs(value).forEach((proof) => {
+            proof.declare();
+            // Collect the witnessed statement vars (in proof order) so the
+            // recorder can bind their auxiliary slots to the verification
+            // machinery's pre-witnessed statement vars — OCaml passes the
+            // same cvars to the rule's main.
+            let proofClass = proof.constructor as typeof Proof;
+            previousStatementFields.push(
+              ...(proofClass.publicInputType.toFields(proof.publicInput) as Field[]),
+              ...(proofClass.publicOutputType.toFields(proof.publicOutput) as Field[])
+            );
+          });
           return value;
         } catch (e: any) {
           e.message = `Error when witnessing Rust Pickles recorded argument ${i} in ${String(
@@ -866,6 +879,7 @@ function ZkProgram<
           throw e;
         }
       });
+      declareRecordedPreviousState(previousStatementFields);
       let result =
         (hasPublicInput
           ? await (methods[key].method as any)(publicInput, ...args)
