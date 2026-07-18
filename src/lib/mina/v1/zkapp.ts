@@ -45,6 +45,7 @@ import {
 import { getProofSystemBackend } from '../../backend.js';
 import {
   compileRecordedProgram,
+  declareRecordedPreviousState,
   declareRecordedSideLoadedVks,
 } from '../../proof-system/rust-pickles-recorded.js';
 import { ZkProgramContext } from '../../proof-system/zkprogram-context.js';
@@ -647,12 +648,22 @@ class SmartContract extends SmartContractBase {
                 Provable.witness(type, () => ProvableType.synthesize(type))
               );
               let witnessedProofs: import('../../proof-system/proof.js').ProofBase<any, any>[] = [];
+              let previousStatementFields: Field[] = [];
               finalArgs.forEach((value) =>
                 extractProofs(value).forEach((proof) => {
                   proof.declare();
                   witnessedProofs.push(proof);
+                  // Bind the witnessed statement vars to the machinery's
+                  // pre-witnessed previous-statement slots (OCaml hands the
+                  // same cvars to the method and to the verifier).
+                  let proofClass = proof.constructor as typeof Proof;
+                  previousStatementFields.push(
+                    ...(proofClass.publicInputType.toFields(proof.publicInput) as Field[]),
+                    ...(proofClass.publicOutputType.toFields(proof.publicOutput) as Field[])
+                  );
                 })
               );
+              declareRecordedPreviousState(previousStatementFields);
               await methods[i](publicInput, ...(finalArgs as [PublicKey, Field, ...unknown[]]));
               // OCaml witnesses the side-loaded keys AFTER the method body
               // (zkprogram.ts jsoo path) — the recorder marker mirrors it.
