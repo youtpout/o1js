@@ -1502,7 +1502,10 @@ async function compileRecordedProgram(
           }
         ).rust_pickles_debug_program_stage;
         if (bisect === undefined) throw Error('debug bindings missing');
-        let report = await runRustPickles(() => bisect(branchesJson, Number(debugStage)));
+        let report = await runRustPickles(() => {
+          seedInPool();
+          return bisect(branchesJson, Number(debugStage));
+        });
         console.error(`[program-debug] ${report}`);
         throw Error(`program compile debug stage ${debugStage} done`);
       }
