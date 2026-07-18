@@ -69,8 +69,10 @@ function ms(t: number) {
 
 console.log(`== bench backend=${backend} ==`);
 
+const cacheOpt =
+  process.env.BENCH_CACHE === 'default' ? {} : { cache: Cache.None };
 let t = performance.now();
-let { verificationKey } = await Program.compile({ cache: Cache.None });
+let { verificationKey } = await Program.compile(cacheOpt);
 let tCompile = performance.now() - t;
 console.log(`compile (3 methods, no cache): ${ms(tCompile)}`);
 
