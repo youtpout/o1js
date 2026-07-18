@@ -43,13 +43,16 @@ import {
   sortMethodArguments,
 } from '../../proof-system/zkprogram.js';
 import { getProofSystemBackend } from '../../backend.js';
-import { compileRecordedProgram } from '../../proof-system/rust-pickles-recorded.js';
+import {
+  compileRecordedProgram,
+  declareRecordedSideLoadedVks,
+} from '../../proof-system/rust-pickles-recorded.js';
 import { ZkProgramContext } from '../../proof-system/zkprogram-context.js';
 import { extractProofs } from '../../proof-system/proof.js';
 import { activeInstance, setActiveInstance } from './mina-instance.js';
 import { newAccount } from './account.js';
 import { VerificationKey } from '../../proof-system/verification-key.js';
-import { Proof, ProofClass } from '../../proof-system/proof.js';
+import { DynamicProof, Proof, ProofClass } from '../../proof-system/proof.js';
 import { PublicKey } from '../../provable/crypto/signature.js';
 import {
   InternalStateType,
@@ -643,10 +646,28 @@ class SmartContract extends SmartContractBase {
               let finalArgs = intf.args.map((type) =>
                 Provable.witness(type, () => ProvableType.synthesize(type))
               );
+              let witnessedProofs: import('../../proof-system/proof.js').ProofBase<any, any>[] = [];
               finalArgs.forEach((value) =>
-                extractProofs(value).forEach((proof) => proof.declare())
+                extractProofs(value).forEach((proof) => {
+                  proof.declare();
+                  witnessedProofs.push(proof);
+                })
               );
               await methods[i](publicInput, ...(finalArgs as [PublicKey, Field, ...unknown[]]));
+              // OCaml witnesses the side-loaded keys AFTER the method body
+              // (zkprogram.ts jsoo path) — the recorder marker mirrors it.
+              declareRecordedSideLoadedVks(
+                witnessedProofs.flatMap((proof, index) => {
+                  if (!(proof instanceof DynamicProof)) return [];
+                  let vk = proof.usedVerificationKey;
+                  if (vk === undefined) {
+                    throw Error(
+                      'proof.verify() not called, call it at least once in your circuit'
+                    );
+                  }
+                  return [{ proof: index, vkHash: vk.hash }];
+                })
+              );
             } finally {
               snarkContext.leave(snarkId);
               ZkProgramContext.leave(id);

@@ -34,6 +34,7 @@ import { Cache, readCache, withVersion, writeCache, type CacheHeader } from './c
 export {
   compileRecorded,
   declareRecordedPreviousState,
+  declareRecordedSideLoadedVks,
   compileRecordedN1Over,
   compileRecordedProgram,
   proveRecordedBaseCase,
@@ -97,6 +98,7 @@ type RecordedConstraintJson =
     }
   | { kind: 'range_check0'; row: RecordedLinCombJson[]; compact: string }
   | { kind: 'range_check1'; row: RecordedLinCombJson[]; next: RecordedLinCombJson[] }
+  | { kind: 'side_loaded_vk'; proof: number; vk_hash: RecordedLinCombJson }
   | {
       kind: 'lookup';
       row: RecordedLinCombJson[];
@@ -324,6 +326,18 @@ class CircuitRecorder {
 }
 
 let recordedPreviousStateFields: Field[] | undefined;
+let recordedSideLoadedVks: { proof: number; vkHash: Field }[] | undefined;
+
+/**
+ * Declares the side-loaded verification keys used by `DynamicProof.verify`
+ * in the recording in progress (one entry per dynamic previous proof, in
+ * logical order). The recorder appends `side_loaded_vk` marker constraints
+ * at the position OCaml emits the key witness + digest gadget (after the
+ * method body), and the Rust replay expands them faithfully.
+ */
+function declareRecordedSideLoadedVks(vks: { proof: number; vkHash: Field }[]) {
+  recordedSideLoadedVks = vks;
+}
 
 /**
  * Declares the previous proofs' statement fields (flattened, in proof order)
@@ -348,6 +362,7 @@ async function recordCircuit(
   await initializeBindings();
   let recorder = new CircuitRecorder();
   recordedPreviousStateFields = undefined;
+  recordedSideLoadedVks = undefined;
 
   let field = Snarky.field;
   let gates = Snarky.gates;
@@ -605,6 +620,16 @@ async function recordCircuit(
       if (dense !== undefined) previous_state_slots.push([dense, flat]);
     });
     recordedPreviousStateFields = undefined;
+    for (let { proof, vkHash } of (recordedSideLoadedVks as
+      | { proof: number; vkHash: Field }[]
+      | undefined) ?? []) {
+      recorder.constraints.push({
+        kind: 'side_loaded_vk',
+        proof,
+        vk_hash: recorder.lc(vkHash.value),
+      });
+    }
+    recordedSideLoadedVks = undefined;
     let circuit = recorder.circuit(output);
     circuit.previous_state_slots = previous_state_slots;
     return { circuit, witness: recorder.witness };

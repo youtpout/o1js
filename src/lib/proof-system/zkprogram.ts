@@ -50,6 +50,7 @@ import {
   proveRecordedN1Over,
   proveRecordedN2,
   declareRecordedPreviousState,
+  declareRecordedSideLoadedVks,
   recordCircuit,
   releaseRecordedBaseProofHandle,
   verifyRecordedBaseCase,
@@ -864,11 +865,13 @@ function ZkProgram<
     let id = ZkProgramContext.enter();
     try {
       let previousStatementFields: Field[] = [];
+      let witnessedProofs: ProofBase<any, any>[] = [];
       let args = zip(privateInputValues, privateInputTypes[methodIndex]).map(([arg, type], i) => {
         try {
           let value = Provable.witness(type, () => arg);
           extractProofs(value).forEach((proof) => {
             proof.declare();
+            witnessedProofs.push(proof);
             // Collect the witnessed statement vars (in proof order) so the
             // recorder can bind their auxiliary slots to the verification
             // machinery's pre-witnessed statement vars — OCaml passes the
@@ -892,6 +895,19 @@ function ZkProgram<
         (hasPublicInput
           ? await (methods[key].method as any)(publicInput, ...args)
           : await (methods[key].method as any)(...args)) ?? {};
+      // OCaml emits the side-loaded key witness + digest gadget AFTER the
+      // rule's main (zkprogram jsoo path: the DynamicProof block following
+      // the method body); the marker reproduces that position.
+      declareRecordedSideLoadedVks(
+        witnessedProofs.flatMap((proof, index) => {
+          if (!(proof instanceof DynamicProof)) return [];
+          let vk = proof.usedVerificationKey;
+          if (vk === undefined) {
+            throw Error('proof.verify() not called, call it at least once in your circuit');
+          }
+          return [{ proof: index, vkHash: vk.hash }];
+        })
+      );
       let outputFields =
         publicOutputType === Undefined || publicOutputType === Void
           ? []
