@@ -1360,21 +1360,40 @@ function lagrangeCacheDir() {
 }
 
 /**
- * wasm has no filesystem: read the Lagrange-basis cache files the native side
- * persists (`~/.cache/pickles-rs`) and seed the wasm-side SRS caches, saving
- * 0.3-1.9s of group-IFFT per domain per process.
+ * Reads the Lagrange-basis cache files the native side persists
+ * (`~/.cache/pickles-rs`) on the main thread. The wasm-side seeding runs
+ * separately (inside the worker pool) via [`seedLagrangeCaches`].
  */
-async function seedLagrangeCaches(bindings: RustPicklesBindings) {
-  if (bindings.rust_pickles_seed_lagrange_basis === undefined) return;
+async function readLagrangeCacheFiles(): Promise<
+  [curve: 'vesta' | 'pallas', domainLog2: number, bytes: Uint8Array][]
+> {
   let fs = await import('node:fs');
   let dir = lagrangeCacheDir();
+  let seeds: [curve: 'vesta' | 'pallas', domainLog2: number, bytes: Uint8Array][] = [];
   for (let [curve, srsLog2, domainLog2] of LAGRANGE_CACHE_ENTRIES) {
     try {
-      let bytes = fs.readFileSync(`${dir}/lagrange-${curve}-srs${1 << srsLog2}-d${domainLog2}.bin`);
-      bindings.rust_pickles_seed_lagrange_basis(curve, domainLog2, bytes);
+      let bytes = fs.readFileSync(`${dir}/lagrange-${curve}-srs${1 << srsLog2}-d${domainLog2}.v2.bin`);
+      seeds.push([curve, domainLog2, bytes]);
     } catch {
       // missing cache file: the basis is recomputed (and persisted below)
     }
+  }
+  return seeds;
+}
+
+/**
+ * wasm has no filesystem: seed the wasm-side SRS caches from pre-read cache
+ * file bytes, saving 0.3-1.9s of group-IFFT per domain per process. The first
+ * seed call materializes the tick/tock SRS, so this must run inside the
+ * worker pool where the parallel SRS creation has threads to spread over.
+ */
+function seedLagrangeCaches(
+  bindings: RustPicklesBindings,
+  seeds: [curve: 'vesta' | 'pallas', domainLog2: number, bytes: Uint8Array][]
+) {
+  if (bindings.rust_pickles_seed_lagrange_basis === undefined) return;
+  for (let [curve, domainLog2, bytes] of seeds) {
+    bindings.rust_pickles_seed_lagrange_basis(curve, domainLog2, bytes);
   }
 }
 
@@ -1384,7 +1403,7 @@ async function persistLagrangeCaches(bindings: RustPicklesBindings) {
   let fs = await import('node:fs');
   let dir = lagrangeCacheDir();
   for (let [curve, srsLog2, domainLog2] of LAGRANGE_CACHE_ENTRIES) {
-    let path = `${dir}/lagrange-${curve}-srs${1 << srsLog2}-d${domainLog2}.bin`;
+    let path = `${dir}/lagrange-${curve}-srs${1 << srsLog2}-d${domainLog2}.v2.bin`;
     try {
       if (fs.existsSync(path)) continue;
       let bytes = bindings.rust_pickles_export_lagrange_basis(curve, domainLog2);
@@ -1429,14 +1448,26 @@ async function compileRecordedProgram(
     console.error(`[o1js compile] program branches dumped to ${branchDump}`);
   }
   if (!useMinaRuntimeBackend()) {
+    let tPhase = performance.now();
     let bindings = await rustPicklesBindings();
-    await seedLagrangeCaches(bindings);
+    if (profile)
+      console.error(`[o1js compile] wasm bindings init: ${(performance.now() - tPhase).toFixed(0)}ms`);
+    tPhase = performance.now();
+    // Read the cache files on the main thread, but run the wasm-side seeding
+    // inside the worker pool: the first seed call materializes the tick/tock
+    // SRS, whose parallel creation needs pool threads (and the main thread
+    // must not block in browsers).
+    let lagrangeSeeds = await readLagrangeCacheFiles();
+    let seedInPool = () => seedLagrangeCaches(bindings, lagrangeSeeds);
+    if (profile)
+      console.error(`[o1js compile] read lagrange files: ${(performance.now() - tPhase).toFixed(0)}ms`);
     let hasRecursion = branches.some((branch) => branch.proofsVerified > 0);
     if (hasRecursion && bindings.rust_pickles_compile_recorded_program_shared !== undefined) {
       // OCaml `Pickles.compile` shape: ONE shared wrap circuit and canonical
       // verification key for the whole program. Programs without recursion
       // keep the width-0 per-branch path, whose wrap (2^13) is already
       // bit-identical to jsoo's.
+      tPhase = performance.now();
       let branchesJson = JSON.stringify(
         recorded.map((entry, i) => ({
           circuit: entry.circuit,
@@ -1444,6 +1475,10 @@ async function compileRecordedProgram(
           proofsVerified: branches[i].proofsVerified,
         }))
       );
+      if (profile)
+        console.error(
+          `[o1js compile] branches JSON: ${(performance.now() - tPhase).toFixed(0)}ms (${(branchesJson.length / 1e6).toFixed(1)}MB)`
+        );
       let debugProbe =
         typeof process !== 'undefined' ? process.env.O1JS_DEBUG_PROBE : undefined;
       if (debugProbe !== undefined) {
@@ -1471,10 +1506,16 @@ async function compileRecordedProgram(
         console.error(`[program-debug] ${report}`);
         throw Error(`program compile debug stage ${debugStage} done`);
       }
-      let program = await runRustPickles(() =>
-        bindings.rust_pickles_compile_recorded_program_shared!(branchesJson)
-      );
-      if (profile) console.error(`[o1js compile] rust shared program compile done`);
+      tPhase = performance.now();
+      let program = await runRustPickles(() => {
+        seedInPool();
+        return bindings.rust_pickles_compile_recorded_program_shared!(branchesJson);
+      });
+      if (profile)
+        console.error(
+          `[o1js compile] rust shared program compile (incl. seed): ${(performance.now() - tPhase).toFixed(0)}ms`
+        );
+      tPhase = performance.now();
       let verificationKey: CanonicalVkEnvelope | undefined;
       if (bindings.rust_pickles_recorded_program_vk_envelope !== undefined) {
         let envelope = JSON.parse(
@@ -1482,8 +1523,14 @@ async function compileRecordedProgram(
         ) as { base64: string; hash: string };
         verificationKey = { data: envelope.base64, hash: envelope.hash };
       }
+      if (profile)
+        console.error(`[o1js compile] vk envelope: ${(performance.now() - tPhase).toFixed(0)}ms`);
+      tPhase = performance.now();
       await persistLagrangeCaches(bindings);
-      return Promise.all(
+      if (profile)
+        console.error(`[o1js compile] persist lagrange: ${(performance.now() - tPhase).toFixed(0)}ms`);
+      tPhase = performance.now();
+      let envelopes = await Promise.all(
         recorded.map((entry, i) =>
           compileRecordedEnvelope(entry, cache, branches[i].proofsVerified, undefined, {
             bindings,
@@ -1494,6 +1541,11 @@ async function compileRecordedProgram(
           })
         )
       );
+      if (profile)
+        console.error(
+          `[o1js compile] branch envelopes: ${(performance.now() - tPhase).toFixed(0)}ms`
+        );
+      return envelopes;
     }
     if (bindings.rust_pickles_compile_recorded_program !== undefined) {
       // One call compiling every branch in parallel inside the rayon pool —
@@ -1505,9 +1557,10 @@ async function compileRecordedProgram(
           proofsVerified: branches[i].proofsVerified,
         }))
       );
-      let compiledHandles = await runRustPickles(() =>
-        bindings.rust_pickles_compile_recorded_program!(branchesJson)
-      );
+      let compiledHandles = await runRustPickles(() => {
+        seedInPool();
+        return bindings.rust_pickles_compile_recorded_program!(branchesJson);
+      });
       if (profile) console.error(`[o1js compile] rust batch compile done`);
       await persistLagrangeCaches(bindings);
       return Promise.all(
@@ -1522,6 +1575,7 @@ async function compileRecordedProgram(
         })
       );
     }
+    await runRustPickles(() => seedInPool());
     return Promise.all(
       recorded.map((entry, i) => compileRecordedEnvelope(entry, cache, branches[i].proofsVerified))
     );
