@@ -1574,13 +1574,71 @@ async function compileRecordedProgram(
         throw Error(`program compile debug stage ${debugStage} done`);
       }
       tPhase = performance.now();
-      let program = await runRustPickles(() => {
-        seedInPool();
-        return bindings.rust_pickles_compile_recorded_program_shared!(branchesJson);
-      });
+      let b = bindings as unknown as {
+        rust_pickles_recorded_program_cache_key?: (json: string) => string;
+        rust_pickles_recorded_program_cache_bytes?: (program: unknown) => Uint8Array;
+        rust_pickles_compile_recorded_program_from_cache_bytes?: (
+          json: string,
+          bytes: Uint8Array
+        ) => unknown;
+      };
+      let programCacheKey = b.rust_pickles_recorded_program_cache_key?.(branchesJson);
+      let programCacheHeader =
+        programCacheKey === undefined
+          ? undefined
+          : withVersion({
+              kind: 'step-pk',
+              persistentId: programCacheKey,
+              uniqueId: programCacheKey,
+              dataType: 'bytes',
+              programName: 'rust-pickles-program',
+              methodName: programCacheKey,
+              methodIndex: 0,
+              hash: programCacheKey,
+            } as Omit<CacheHeader, 'version'>);
+      let program: unknown | undefined;
+      let restoredFromCache = false;
+      let cachedProgramBytes =
+        programCacheHeader === undefined ? undefined : readCache(cache, programCacheHeader);
+      if (
+        cachedProgramBytes !== undefined &&
+        b.rust_pickles_compile_recorded_program_from_cache_bytes !== undefined
+      ) {
+        try {
+          program = await runRustPickles(() => {
+            seedInPool();
+            return b.rust_pickles_compile_recorded_program_from_cache_bytes!(
+              branchesJson,
+              cachedProgramBytes
+            );
+          });
+          restoredFromCache = true;
+        } catch {
+          program = undefined; // stale/corrupt cache entry: recompile
+        }
+      }
+      if (program === undefined) {
+        program = await runRustPickles(() => {
+          seedInPool();
+          return bindings.rust_pickles_compile_recorded_program_shared!(branchesJson);
+        });
+      }
+      if (
+        !restoredFromCache &&
+        programCacheHeader !== undefined &&
+        cache.canWrite &&
+        b.rust_pickles_recorded_program_cache_bytes !== undefined
+      ) {
+        try {
+          let bytes = b.rust_pickles_recorded_program_cache_bytes(program);
+          cache.write(programCacheHeader, bytes);
+        } catch {
+          // caching is best-effort
+        }
+      }
       if (profile)
         console.error(
-          `[o1js compile] rust shared program compile (incl. seed): ${(performance.now() - tPhase).toFixed(0)}ms`
+          `[o1js compile] rust shared program ${restoredFromCache ? 'cache restore' : 'compile'} (incl. seed): ${(performance.now() - tPhase).toFixed(0)}ms`
         );
       tPhase = performance.now();
       let verificationKey: CanonicalVkEnvelope | undefined;
