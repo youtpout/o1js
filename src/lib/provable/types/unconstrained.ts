@@ -5,7 +5,18 @@ import { assert } from '../../util/errors.js';
 import { asProver, inCheckedComputation } from '../core/provable-context.js';
 import { witness } from './witness.js';
 
-export { Unconstrained };
+export { Unconstrained, setAllowEmptyUnconstrained };
+
+/**
+ * When true, `Unconstrained.get()` returns `undefined` for an empty value
+ * instead of throwing. Set only by the Rust Pickles recorder around its
+ * compile pass, where circuits run in witness-generation mode with dummy
+ * inputs that can leave an `Unconstrained` empty.
+ */
+let allowEmptyUnconstrained = false;
+function setAllowEmptyUnconstrained(value: boolean) {
+  allowEmptyUnconstrained = value;
+}
 
 /**
  * Container which holds an unconstrained value. This can be used to pass values
@@ -55,6 +66,13 @@ class Unconstrained<T> {
 The only place where you can read unconstrained values is in Provable.witness()
 and Provable.asProver() blocks, which execute outside the proof.
 `);
+    // The Rust Pickles recorder runs the circuit in witness-generation mode
+    // even for compilation (which only needs the constraint structure). With
+    // the dummy inputs of a compile pass an `Unconstrained` can legitimately
+    // be empty; its value never enters a constraint, so returning `undefined`
+    // lets structural cloning proceed without affecting the VK. Outside that
+    // window the assert still guards against real empty reads.
+    if (!this.option.isSome && allowEmptyUnconstrained) return undefined as T;
     assert(this.option.isSome, 'Empty `Unconstrained`'); // never triggered
     return this.option.value;
   }

@@ -234,7 +234,9 @@ class MerkleList<T> implements MerkleListBase<T> {
   }
 
   clone(): MerkleList<T> {
-    let data = Unconstrained.witness(() => [...this.data.get()]);
+    // `get()` may return undefined when the recorder clones an empty list
+    // during its compile pass (see setAllowEmptyUnconstrained).
+    let data = Unconstrained.witness(() => [...(this.data.get() ?? [])]);
     return new this.Constructor({ hash: this.hash, data });
   }
 
@@ -582,7 +584,7 @@ class MerkleListIterator<T> implements MerkleListIteratorBase<T> {
   }
 
   clone(): MerkleListIterator<T> {
-    let data = Unconstrained.witness(() => [...this.data.get()]);
+    let data = Unconstrained.witness(() => [...(this.data.get() ?? [])]);
     let currentIndex = Unconstrained.witness(() => this.currentIndex.get());
     return new this.Constructor({
       data,

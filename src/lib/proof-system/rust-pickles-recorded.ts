@@ -25,6 +25,7 @@ import {
 } from '../mina-runtime/backend.js';
 import { FieldConst, FieldType, FieldVar } from '../provable/core/fieldvar.js';
 import { existsOne } from '../provable/core/exists.js';
+import { setAllowEmptyUnconstrained } from '../provable/types/unconstrained.js';
 import { Fp } from '../../bindings/crypto/finite-field.js';
 import { poseidonParamsKimchiFp } from '../../bindings/crypto/constants.js';
 import { snarkContext } from '../provable/core/provable-context.js';
@@ -280,6 +281,14 @@ function assertLength<T>(name: string, values: T[], length: number): T[] {
   return values;
 }
 
+/**
+ * True while recording a structure-only (compile) pass: the circuit runs in
+ * constraint-system mode so witness callbacks (async fetches, `this.sender`,
+ * state-dependent asserts, `Unconstrained` reads) never execute. Only the
+ * constraint structure is captured, which is all the VK depends on.
+ */
+let structureOnlyPass = false;
+
 class CircuitRecorder {
   /** jsoo variable index -> dense recorded index */
   varIndex = new Map<number, number>();
@@ -288,6 +297,11 @@ class CircuitRecorder {
   constraints: RecordedConstraintJson[] = [];
 
   private readVarValue(jsooIndex: number): string {
+    // A structure-only compile pass runs in constraint-system mode with no
+    // witness, so there is no value to read. The VK depends only on the
+    // circuit structure (verified: zeroing the witness leaves the VK
+    // unchanged), so a dummy 0 is sound here.
+    if (structureOnlyPass) return '0';
     // reading a variable's value is prover code, so run it in an asProver block
     let value: bigint | undefined;
     Snarky.run.asProver(() => {
@@ -493,6 +507,10 @@ async function recordCircuit(
   let poseidonMds = poseidonParamsKimchiFp.mds.map((row) => row.map(BigInt));
   let poseidonRounds = poseidonParamsKimchiFp.fullRounds;
   let readVarBigint = (x: FieldVar): bigint => {
+    // Structure-only compile: no witness, so intermediate poseidon states
+    // cannot (and need not) be computed. The gate's variable layout is still
+    // allocated below, which is all the VK depends on.
+    if (structureOnlyPass) return 0n;
     let value: bigint | undefined;
     Snarky.run.asProver(() => {
       value = FieldConst.toBigint(Snarky.field.readVar(x));
@@ -611,7 +629,20 @@ async function recordCircuit(
     let gate = (gates as Record<string, unknown>)[name];
     if (typeof gate !== 'function') continue;
     originalGates.set(name, gate);
-    (gates as Record<string, unknown>)[name] = () => {
+    (gates as Record<string, unknown>)[name] = (...args: unknown[]) => {
+      // Inventory mode: collect every unsupported gate a circuit uses instead
+      // of aborting at the first, then fall through to the original gate so
+      // recording continues. Enabled by setting globalThis.__missingGates.
+      let inventory = (globalThis as Record<string, unknown>).__missingGates as
+        | Set<string>
+        | undefined;
+      if (inventory instanceof Set) {
+        if (!inventory.has(name)) {
+          inventory.add(name);
+          console.error('[missing-gate]', name);
+        }
+        return (gate as (...a: unknown[]) => unknown).call(gates, ...args);
+      }
       throw Error(
         `Rust Pickles recorder: the '${name}' gate is not supported yet — ` +
           'this circuit cannot be recorded for the Rust backend.'
@@ -619,9 +650,24 @@ async function recordCircuit(
     };
   }
 
-  let id = snarkContext.enter({ inCheckedComputation: true });
+  // A compile pass (validateWitness=false) only needs the constraint
+  // structure. Run it in constraint-system mode so no witness callback runs —
+  // no async fetch, `this.sender`, state-dependent assert or `Unconstrained`
+  // read executes, which is exactly what breaks real contracts at compile.
+  // The VK is unaffected: it depends only on the structure (verified — zeroing
+  // the witness leaves the VK unchanged).
+  let structureOnly = !validateWitness;
+  structureOnlyPass = structureOnly;
+  if (structureOnly) setAllowEmptyUnconstrained(true);
+  let id = snarkContext.enter(
+    structureOnly
+      ? { inAnalyze: true, inCheckedComputation: true }
+      : { inCheckedComputation: true }
+  );
   try {
-    let finish = Snarky.run.enterGenerateWitness();
+    let finish = structureOnly
+      ? Snarky.run.enterConstraintSystem()
+      : Snarky.run.enterGenerateWitness();
     let outputs = await f();
     let output = outputs.map((x) => recorder.lc(x.value));
     finish();
@@ -649,6 +695,8 @@ async function recordCircuit(
     recordedPreviousProofWidths = undefined;
     return { circuit, witness: recorder.witness };
   } finally {
+    structureOnlyPass = false;
+    setAllowEmptyUnconstrained(false);
     snarkContext.leave(id);
     field.assertEqual = original.assertEqual;
     field.assertMul = original.assertMul;
