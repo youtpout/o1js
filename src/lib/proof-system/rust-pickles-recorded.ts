@@ -1799,8 +1799,9 @@ async function compileRecordedProgram(
       return envelopes;
     }
     if (bindings.rust_pickles_compile_recorded_program !== undefined) {
-      // One call compiling every branch in parallel inside the rayon pool —
-      // per-method calls serialize across the wasm boundary.
+      // One call compiling every branch (sequentially inside the rayon pool —
+      // each branch parallelizes internally); per-method calls serialize
+      // across the wasm boundary.
       let branchesJson = JSON.stringify(
         recorded.map((entry, i) => ({
           circuit: entry.circuit,
