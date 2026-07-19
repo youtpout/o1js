@@ -41,7 +41,11 @@ type CompiledCircuit = {
   publicOutputSize: number;
 };
 
-type CompiledProgram = { branches: CompiledCircuit[] };
+type CompiledProgram = {
+  branches: CompiledCircuit[];
+  cacheBytesBase64?: string;
+  restoredFromCache?: boolean;
+};
 
 type RustProofResponse = {
   appState: string[];
@@ -98,9 +102,22 @@ class MinaRuntimeClient {
   }
 
   compileProgram(
+    branches: { circuit: RecordedCircuit; witness: string[]; proofsVerified: 0 | 1 | 2 }[],
+    options?: { cacheBytesBase64?: string; wantCacheBytes?: boolean }
+  ) {
+    return this.#execute<CompiledProgram>('compileProgram', {
+      branches,
+      ...(options?.cacheBytesBase64 !== undefined
+        ? { cacheBytesBase64: options.cacheBytesBase64 }
+        : {}),
+      ...(options?.wantCacheBytes ? { wantCacheBytes: true } : {}),
+    });
+  }
+
+  programCacheKey(
     branches: { circuit: RecordedCircuit; witness: string[]; proofsVerified: 0 | 1 | 2 }[]
   ) {
-    return this.#execute<CompiledProgram>('compileProgram', { branches });
+    return this.#execute<string>('programCacheKey', { branches });
   }
 
   proveCircuit(circuitId: number, witness: string[], signal?: AbortSignal) {

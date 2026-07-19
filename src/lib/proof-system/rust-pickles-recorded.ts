@@ -1425,12 +1425,28 @@ function lagrangeCacheDir() {
  * (`~/.cache/pickles-rs`) on the main thread. The wasm-side seeding runs
  * separately (inside the worker pool) via [`seedLagrangeCaches`].
  */
+const SRS_CACHE_ENTRIES: [curve: 'vesta' | 'pallas', srsLog2: number][] = [
+  ['vesta', 16],
+  ['pallas', 15],
+];
+
 async function readLagrangeCacheFiles(): Promise<
   [curve: 'vesta' | 'pallas', domainLog2: number, bytes: Uint8Array][]
 > {
   let fs = await import('node:fs');
   let dir = lagrangeCacheDir();
   let seeds: [curve: 'vesta' | 'pallas', domainLog2: number, bytes: Uint8Array][] = [];
+  // The raw SRS payloads seed FIRST (domainLog2 = -1 sentinel): any other
+  // seed or compile creates the SRS if absent, which is the expensive
+  // serial group map in wasm. jsoo persists its SRS the same way.
+  for (let [curve, srsLog2] of SRS_CACHE_ENTRIES) {
+    try {
+      let bytes = fs.readFileSync(`${dir}/srs-${curve}-${1 << srsLog2}.v2.bin`);
+      seeds.push([curve, -1, bytes]);
+    } catch {
+      // missing cache file: the SRS is recreated (and persisted below)
+    }
+  }
   for (let [curve, srsLog2, domainLog2] of LAGRANGE_CACHE_ENTRIES) {
     try {
       let bytes = fs.readFileSync(`${dir}/lagrange-${curve}-srs${1 << srsLog2}-d${domainLog2}.v2.bin`);
@@ -1452,9 +1468,15 @@ function seedLagrangeCaches(
   bindings: RustPicklesBindings,
   seeds: [curve: 'vesta' | 'pallas', domainLog2: number, bytes: Uint8Array][]
 ) {
-  if (bindings.rust_pickles_seed_lagrange_basis === undefined) return;
+  let b = bindings as unknown as {
+    rust_pickles_seed_srs?: (curve: string, bytes: Uint8Array) => boolean;
+  };
   for (let [curve, domainLog2, bytes] of seeds) {
-    bindings.rust_pickles_seed_lagrange_basis(curve, domainLog2, bytes);
+    if (domainLog2 === -1) {
+      b.rust_pickles_seed_srs?.(curve, bytes);
+    } else {
+      bindings.rust_pickles_seed_lagrange_basis?.(curve, domainLog2, bytes);
+    }
   }
 }
 
@@ -1463,6 +1485,22 @@ async function persistLagrangeCaches(bindings: RustPicklesBindings) {
   if (bindings.rust_pickles_export_lagrange_basis === undefined) return;
   let fs = await import('node:fs');
   let dir = lagrangeCacheDir();
+  let b = bindings as unknown as {
+    rust_pickles_export_srs?: (curve: string) => Uint8Array;
+  };
+  for (let [curve, srsLog2] of SRS_CACHE_ENTRIES) {
+    let path = `${dir}/srs-${curve}-${1 << srsLog2}.v2.bin`;
+    try {
+      if (fs.existsSync(path) || b.rust_pickles_export_srs === undefined) continue;
+      let bytes = b.rust_pickles_export_srs(curve);
+      if (bytes.length === 0) continue;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(`${path}.tmp`, bytes);
+      fs.renameSync(`${path}.tmp`, path);
+    } catch {
+      // persisting is best-effort
+    }
+  }
   for (let [curve, srsLog2, domainLog2] of LAGRANGE_CACHE_ENTRIES) {
     let path = `${dir}/lagrange-${curve}-srs${1 << srsLog2}-d${domainLog2}.v2.bin`;
     try {
@@ -1717,14 +1755,56 @@ async function compileRecordedProgram(
   }
   let client = await minaRuntimeClient();
   let tRust = performance.now();
-  let compiled = client.compileProgram(
-    recorded.map((entry, i) => ({
-      circuit: entry.circuit,
-      witness: entry.witness,
-      proofsVerified: branches[i].proofsVerified,
-    }))
-  );
-  if (profile) console.error(`[o1js compile] rust compileProgram: ${(performance.now() - tRust).toFixed(0)}ms`);
+  let runtimeBranches = recorded.map((entry, i) => ({
+    circuit: entry.circuit,
+    witness: entry.witness,
+    proofsVerified: branches[i].proofsVerified,
+  }));
+  // Prover-key cache, same semantics as jsoo: read -> restore; miss ->
+  // compile and persist (best-effort).
+  let runtimeCacheKey: string | undefined;
+  try {
+    runtimeCacheKey = client.programCacheKey(runtimeBranches);
+  } catch {
+    runtimeCacheKey = undefined;
+  }
+  let runtimeCacheHeader =
+    runtimeCacheKey === undefined
+      ? undefined
+      : withVersion({
+          kind: 'step-pk',
+          persistentId: runtimeCacheKey,
+          uniqueId: runtimeCacheKey,
+          dataType: 'bytes',
+          programName: 'rust-pickles-program',
+          methodName: runtimeCacheKey,
+          methodIndex: 0,
+          hash: runtimeCacheKey,
+        } as Omit<CacheHeader, 'version'>);
+  let cachedRuntimeBytes =
+    runtimeCacheHeader === undefined ? undefined : readCache(cache, runtimeCacheHeader);
+  let compiled = client.compileProgram(runtimeBranches, {
+    cacheBytesBase64:
+      cachedRuntimeBytes === undefined
+        ? undefined
+        : Buffer.from(cachedRuntimeBytes).toString('base64'),
+    wantCacheBytes: runtimeCacheHeader !== undefined && cache.canWrite,
+  });
+  if (
+    compiled.cacheBytesBase64 !== undefined &&
+    runtimeCacheHeader !== undefined &&
+    cache.canWrite
+  ) {
+    try {
+      cache.write(runtimeCacheHeader, Buffer.from(compiled.cacheBytesBase64, 'base64'));
+    } catch {
+      // caching is best-effort
+    }
+  }
+  if (profile)
+    console.error(
+      `[o1js compile] rust compileProgram (${compiled.restoredFromCache ? 'cache restore' : 'cold'}): ${(performance.now() - tRust).toFixed(0)}ms`
+    );
   return Promise.all(
     recorded.map((entry, i) =>
       compileRecordedEnvelope(entry, cache, branches[i].proofsVerified, {
