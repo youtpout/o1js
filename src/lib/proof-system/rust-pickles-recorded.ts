@@ -1493,9 +1493,20 @@ function readSrsCacheSeeds(cache: Cache): SrsCacheSeed[] {
  * spread over.
  */
 function seedLagrangeCaches(bindings: RustPicklesBindings, seeds: SrsCacheSeed[]) {
+  if (seeds.length === 0) return;
   let b = bindings as unknown as {
     rust_pickles_seed_srs?: (curve: string, bytes: Uint8Array) => boolean;
+    rust_pickles_seed_srs_cache_batch?: (entriesJson: string, payloads: Uint8Array[]) => number;
   };
+  // One wasm call for every entry: entering the worker pool costs ~200ms of
+  // coordination per call, which would dwarf the decode itself.
+  if (b.rust_pickles_seed_srs_cache_batch !== undefined) {
+    b.rust_pickles_seed_srs_cache_batch(
+      JSON.stringify(seeds.map(([curve, domainLog2]) => ({ curve, domainLog2 }))),
+      seeds.map(([, , bytes]) => bytes)
+    );
+    return;
+  }
   for (let [curve, domainLog2, bytes] of seeds) {
     if (domainLog2 === -1) {
       b.rust_pickles_seed_srs?.(curve, bytes);
