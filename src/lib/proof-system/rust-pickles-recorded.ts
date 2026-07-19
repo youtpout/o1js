@@ -34,6 +34,7 @@ import { Cache, readCache, withVersion, writeCache, type CacheHeader } from './c
 export {
   compileRecorded,
   declareRecordedPreviousState,
+  declareRecordedPreviousProofWidths,
   declareRecordedSideLoadedVks,
   compileRecordedN1Over,
   compileRecordedProgram,
@@ -327,6 +328,17 @@ class CircuitRecorder {
 
 let recordedPreviousStateFields: Field[] | undefined;
 let recordedSideLoadedVks: { proof: number; vkHash: Field }[] | undefined;
+let recordedPreviousProofWidths: number[] | undefined;
+
+/**
+ * Declares the previous proofs' own program widths (OCaml per-tag
+ * `max_proofs_verified`) for the recording in progress. Recorded into the
+ * circuit by BOTH the compile and the prove re-recording, so the shape
+ * comparison stays stable.
+ */
+function declareRecordedPreviousProofWidths(widths: number[]) {
+  recordedPreviousProofWidths = widths;
+}
 
 /**
  * Declares the side-loaded verification keys used by `DynamicProof.verify`
@@ -363,6 +375,7 @@ async function recordCircuit(
   let recorder = new CircuitRecorder();
   recordedPreviousStateFields = undefined;
   recordedSideLoadedVks = undefined;
+  recordedPreviousProofWidths = undefined;
 
   let field = Snarky.field;
   let gates = Snarky.gates;
@@ -632,6 +645,8 @@ async function recordCircuit(
     recordedSideLoadedVks = undefined;
     let circuit = recorder.circuit(output);
     circuit.previous_state_slots = previous_state_slots;
+    circuit.previous_proof_widths = (recordedPreviousProofWidths as number[] | undefined) ?? [];
+    recordedPreviousProofWidths = undefined;
     return { circuit, witness: recorder.witness };
   } finally {
     snarkContext.leave(id);
@@ -1520,7 +1535,6 @@ async function compileRecordedProgram(
   branches: {
     circuit: () => Field[] | Promise<Field[]>;
     proofsVerified: 0 | 1 | 2;
-    previousProofWidths?: number[];
   }[],
   cache: Cache = Cache.FileSystemDefault
 ): Promise<RecordedCompiledCircuit[]> {
@@ -1528,9 +1542,10 @@ async function compileRecordedProgram(
   let tRecord = performance.now();
   let recorded: Awaited<ReturnType<typeof recordCircuit>>[] = [];
   for (let branch of branches) {
-    let entry = await recordCircuit(branch.circuit, { validateWitness: false });
-    entry.circuit.previous_proof_widths = branch.previousProofWidths ?? [];
-    recorded.push(entry);
+    // `previous_proof_widths` come from the recording itself
+    // (`declareRecordedPreviousProofWidths`), so the compile and the prove
+    // re-recording produce byte-identical circuit JSON.
+    recorded.push(await recordCircuit(branch.circuit, { validateWitness: false }));
   }
   if (profile) console.error(`[o1js compile] recording: ${(performance.now() - tRecord).toFixed(0)}ms`);
   let branchDump =

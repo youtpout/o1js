@@ -50,6 +50,7 @@ import {
   proveRecordedN1Over,
   proveRecordedN2,
   declareRecordedPreviousState,
+  declareRecordedPreviousProofWidths,
   declareRecordedSideLoadedVks,
   recordCircuit,
   releaseRecordedBaseProofHandle,
@@ -558,14 +559,6 @@ function ZkProgram<
             return {
               circuit: () => rustPicklesOutputFieldsForMethod(key, inputArgs as any, true),
               proofsVerified: proofs[i].length as 0 | 1 | 2,
-              // OCaml per-tag max_proofs_verified: a DynamicProof carries its
-              // declared bound; a SelfProof is this program's own width.
-              previousProofWidths: proofs[i].map((P) =>
-                typeof (P as unknown as { maxProofsVerified?: number }).maxProofsVerified ===
-                'number'
-                  ? ((P as unknown as { maxProofsVerified: number }).maxProofsVerified as number)
-                  : maxProofsVerified!
-              ),
             };
           }),
           cache
@@ -895,6 +888,17 @@ function ZkProgram<
         (hasPublicInput
           ? await (methods[key].method as any)(publicInput, ...args)
           : await (methods[key].method as any)(...args)) ?? {};
+      // OCaml per-tag max_proofs_verified: a DynamicProof carries its
+      // declared bound; a SelfProof is this program's own width. Declared
+      // from the recording itself so compile and prove re-recording agree.
+      declareRecordedPreviousProofWidths(
+        witnessedProofs.map((proof) => {
+          let P = proof.constructor as unknown as { maxProofsVerified?: number };
+          return typeof P.maxProofsVerified === 'number'
+            ? P.maxProofsVerified
+            : (maxProofsVerified ?? 0);
+        })
+      );
       // OCaml emits the side-loaded key witness + digest gadget AFTER the
       // rule's main (zkprogram jsoo path: the DynamicProof block following
       // the method body); the marker reproduces that position.

@@ -45,6 +45,7 @@ import {
 import { getProofSystemBackend } from '../../backend.js';
 import {
   compileRecordedProgram,
+  declareRecordedPreviousProofWidths,
   declareRecordedPreviousState,
   declareRecordedSideLoadedVks,
 } from '../../proof-system/rust-pickles-recorded.js';
@@ -665,6 +666,16 @@ class SmartContract extends SmartContractBase {
               );
               declareRecordedPreviousState(previousStatementFields);
               await methods[i](publicInput, ...(finalArgs as [PublicKey, Field, ...unknown[]]));
+              // Declared from the recording itself so compile and any
+              // re-recording agree byte-for-byte.
+              declareRecordedPreviousProofWidths(
+                witnessedProofs.map((proof) => {
+                  let P = proof.constructor as unknown as { maxProofsVerified?: number };
+                  return typeof P.maxProofsVerified === 'number'
+                    ? P.maxProofsVerified
+                    : maxProofsVerified;
+                })
+              );
               // OCaml witnesses the side-loaded keys AFTER the method body
               // (zkprogram.ts jsoo path) — the recorder marker mirrors it.
               declareRecordedSideLoadedVks(
@@ -687,13 +698,6 @@ class SmartContract extends SmartContractBase {
             return ZkappPublicInput.toFields(publicInput);
           },
           proofsVerified: proofs[i].length as 0 | 1 | 2,
-          // OCaml per-tag max_proofs_verified (DynamicProof bound, or this
-          // contract's own width for Self/regular proofs).
-          previousProofWidths: proofs[i].map((P) =>
-            typeof (P as unknown as { maxProofsVerified?: number }).maxProofsVerified === 'number'
-              ? ((P as unknown as { maxProofsVerified: number }).maxProofsVerified as number)
-              : maxProofsVerified
-          ),
         })),
         cache
         );
