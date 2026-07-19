@@ -120,6 +120,23 @@ class MinaRuntimeClient {
     return this.#execute<string>('programCacheKey', { branches });
   }
 
+  /** Seeds the runtime's in-process SRS or Lagrange-basis cache from an o1js
+   * `Cache` entry payload (jsoo JSON, base64). `domainLog2` absent seeds the
+   * SRS itself. */
+  seedSrsCache(curve: 'vesta' | 'pallas', payloadBase64: string, domainLog2?: number) {
+    return this.#execute<boolean>('seedSrsCache', { curve, payloadBase64, domainLog2 });
+  }
+
+  /** Exports the runtime's in-process SRS (`domainLog2` absent) or a
+   * Lagrange basis as an o1js `Cache` entry payload (jsoo JSON, base64);
+   * `payloadBase64` is null-ish when not materialized yet. */
+  exportSrsCache(curve: 'vesta' | 'pallas', domainLog2?: number) {
+    return this.#execute<{ payloadBase64?: string | null }>('exportSrsCache', {
+      curve,
+      domainLog2,
+    });
+  }
+
   proveCircuit(circuitId: number, witness: string[], signal?: AbortSignal) {
     return this.#executeAsync<RustProofResponse>('proveCircuit', { circuitId, witness }, signal);
   }

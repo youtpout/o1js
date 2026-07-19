@@ -1418,71 +1418,81 @@ async function compileRecorded(
   return compileRecordedEnvelope(recorded, cache, proofsVerified);
 }
 
-/** The fixed recursion domains warmed by pickles' compile paths. */
-const LAGRANGE_CACHE_ENTRIES: [curve: 'vesta' | 'pallas', srsLog2: number, domainLog2: number][] = [
-  ['vesta', 16, 14],
-  ['vesta', 16, 15],
-  ['vesta', 16, 16],
-  ['pallas', 15, 13],
-  ['pallas', 15, 15],
-];
+// ---------------------------------------------------------------------------
+// SRS / Lagrange-basis cache — the exact jsoo entries, via the o1js `Cache`.
+//
+// jsoo persists the SRS and Lagrange bases through the `Cache` object
+// (`srs-fp-65536`, `lagrange-basis-fp-16384`, ... — JSON `OrInfinity`
+// payloads, version 1). The rust backends read and write those identical
+// entries with the identical gating: `Cache.None` yields no reads and
+// `canWrite: false` blocks writes, so nothing is persisted; a cache warmed
+// by jsoo warms rust and vice versa.
+// ---------------------------------------------------------------------------
 
-function lagrangeCacheDir() {
-  let env = process.env.PICKLES_CACHE_DIR;
-  if (env !== undefined) return env;
-  let xdg = process.env.XDG_CACHE_HOME;
-  if (xdg !== undefined) return `${xdg}/pickles-rs`;
-  return `${process.env.HOME}/.cache/pickles-rs`;
-}
+const srsCacheVersion = 1;
+
+/** fp ↔ Vesta (tick, 2^16), fq ↔ Pallas (tock, 2^15) — jsoo's SRS entries. */
+const SRS_CACHE_ENTRIES = [
+  ['fp', 'vesta', 16],
+  ['fq', 'pallas', 15],
+] as const;
 
 /**
- * Reads the Lagrange-basis cache files the native side persists
- * (`~/.cache/pickles-rs`) on the main thread. The wasm-side seeding runs
- * separately (inside the worker pool) via [`seedLagrangeCaches`].
+ * Domains a compile may materialize Lagrange bases for: wrap domains
+ * 2^13..2^15 plus step domains up to the full 2^16. Reading probes every
+ * candidate (a miss is one failed file read); writing persists only bases
+ * the backend actually computed.
  */
-const SRS_CACHE_ENTRIES: [curve: 'vesta' | 'pallas', srsLog2: number][] = [
-  ['vesta', 16],
-  ['pallas', 15],
-];
+const LAGRANGE_CACHE_DOMAINS = [
+  ['fp', 'vesta', [9, 10, 11, 12, 13, 14, 15, 16]],
+  ['fq', 'pallas', [13, 14, 15]],
+] as const;
 
-async function readLagrangeCacheFiles(): Promise<
-  [curve: 'vesta' | 'pallas', domainLog2: number, bytes: Uint8Array][]
-> {
-  let fs = await import('node:fs');
-  let dir = lagrangeCacheDir();
-  let seeds: [curve: 'vesta' | 'pallas', domainLog2: number, bytes: Uint8Array][] = [];
-  // The raw SRS payloads seed FIRST (domainLog2 = -1 sentinel): any other
-  // seed or compile creates the SRS if absent, which is the expensive
-  // serial group map in wasm. jsoo persists its SRS the same way.
-  for (let [curve, srsLog2] of SRS_CACHE_ENTRIES) {
-    try {
-      let bytes = fs.readFileSync(`${dir}/srs-${curve}-${1 << srsLog2}.v2.bin`);
-      seeds.push([curve, -1, bytes]);
-    } catch {
-      // missing cache file: the SRS is recreated (and persisted below)
-    }
+function srsCacheHeader(f: 'fp' | 'fq', size: number): CacheHeader {
+  let id = `srs-${f}-${size}`;
+  return withVersion(
+    { kind: 'srs', persistentId: id, uniqueId: id, dataType: 'string' },
+    srsCacheVersion
+  );
+}
+function lagrangeBasisCacheHeader(f: 'fp' | 'fq', domainSize: number): CacheHeader {
+  let id = `lagrange-basis-${f}-${domainSize}`;
+  return withVersion(
+    { kind: 'lagrange-basis', persistentId: id, uniqueId: id, dataType: 'string' },
+    srsCacheVersion
+  );
+}
+
+type SrsCacheSeed = [curve: 'vesta' | 'pallas', domainLog2: number, bytes: Uint8Array];
+
+/**
+ * Reads every present SRS/Lagrange entry from the o1js cache. The SRS
+ * payloads come first (`domainLog2 = -1` sentinel): any other seed or
+ * compile creates the SRS if absent, which is the expensive serial group
+ * map in wasm.
+ */
+function readSrsCacheSeeds(cache: Cache): SrsCacheSeed[] {
+  let seeds: SrsCacheSeed[] = [];
+  for (let [f, curve, srsLog2] of SRS_CACHE_ENTRIES) {
+    let bytes = readCache(cache, srsCacheHeader(f, 1 << srsLog2));
+    if (bytes !== undefined) seeds.push([curve, -1, bytes]);
   }
-  for (let [curve, srsLog2, domainLog2] of LAGRANGE_CACHE_ENTRIES) {
-    try {
-      let bytes = fs.readFileSync(`${dir}/lagrange-${curve}-srs${1 << srsLog2}-d${domainLog2}.v2.bin`);
-      seeds.push([curve, domainLog2, bytes]);
-    } catch {
-      // missing cache file: the basis is recomputed (and persisted below)
+  for (let [f, curve, domains] of LAGRANGE_CACHE_DOMAINS) {
+    for (let domainLog2 of domains) {
+      let bytes = readCache(cache, lagrangeBasisCacheHeader(f, 1 << domainLog2));
+      if (bytes !== undefined) seeds.push([curve, domainLog2, bytes]);
     }
   }
   return seeds;
 }
 
 /**
- * wasm has no filesystem: seed the wasm-side SRS caches from pre-read cache
- * file bytes, saving 0.3-1.9s of group-IFFT per domain per process. The first
- * seed call materializes the tick/tock SRS, so this must run inside the
- * worker pool where the parallel SRS creation has threads to spread over.
+ * wasm has no filesystem: seed the wasm-side caches from pre-read cache
+ * entries. The first seed call materializes the tick/tock SRS, so this must
+ * run inside the worker pool where the parallel SRS creation has threads to
+ * spread over.
  */
-function seedLagrangeCaches(
-  bindings: RustPicklesBindings,
-  seeds: [curve: 'vesta' | 'pallas', domainLog2: number, bytes: Uint8Array][]
-) {
+function seedLagrangeCaches(bindings: RustPicklesBindings, seeds: SrsCacheSeed[]) {
   let b = bindings as unknown as {
     rust_pickles_seed_srs?: (curve: string, bytes: Uint8Array) => boolean;
   };
@@ -1495,40 +1505,44 @@ function seedLagrangeCaches(
   }
 }
 
-/** Persist freshly computed bases so the next process seeds them from disk. */
-async function persistLagrangeCaches(bindings: RustPicklesBindings) {
+/**
+ * Persists freshly computed SRS/Lagrange payloads the way jsoo does: only
+ * through a writable cache, and only entries not already present.
+ */
+function persistSrsCacheEntries(
+  cache: Cache,
+  exportPayload: (curve: 'vesta' | 'pallas', domainLog2: number) => Uint8Array | undefined
+) {
+  if (!cache.canWrite) return;
+  for (let [f, curve, srsLog2] of SRS_CACHE_ENTRIES) {
+    let header = srsCacheHeader(f, 1 << srsLog2);
+    if (readCache(cache, header) !== undefined) continue;
+    let bytes = exportPayload(curve, -1);
+    if (bytes === undefined || bytes.length === 0) continue;
+    writeCache(cache, header, bytes);
+  }
+  for (let [f, curve, domains] of LAGRANGE_CACHE_DOMAINS) {
+    for (let domainLog2 of domains) {
+      let header = lagrangeBasisCacheHeader(f, 1 << domainLog2);
+      if (readCache(cache, header) !== undefined) continue;
+      let bytes = exportPayload(curve, domainLog2);
+      if (bytes === undefined || bytes.length === 0) continue;
+      writeCache(cache, header, bytes);
+    }
+  }
+}
+
+/** wasm-backend flavor of [`persistSrsCacheEntries`]. */
+function persistLagrangeCaches(bindings: RustPicklesBindings, cache: Cache) {
   if (bindings.rust_pickles_export_lagrange_basis === undefined) return;
-  let fs = await import('node:fs');
-  let dir = lagrangeCacheDir();
   let b = bindings as unknown as {
     rust_pickles_export_srs?: (curve: string) => Uint8Array;
   };
-  for (let [curve, srsLog2] of SRS_CACHE_ENTRIES) {
-    let path = `${dir}/srs-${curve}-${1 << srsLog2}.v2.bin`;
-    try {
-      if (fs.existsSync(path) || b.rust_pickles_export_srs === undefined) continue;
-      let bytes = b.rust_pickles_export_srs(curve);
-      if (bytes.length === 0) continue;
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(`${path}.tmp`, bytes);
-      fs.renameSync(`${path}.tmp`, path);
-    } catch {
-      // persisting is best-effort
-    }
-  }
-  for (let [curve, srsLog2, domainLog2] of LAGRANGE_CACHE_ENTRIES) {
-    let path = `${dir}/lagrange-${curve}-srs${1 << srsLog2}-d${domainLog2}.v2.bin`;
-    try {
-      if (fs.existsSync(path)) continue;
-      let bytes = bindings.rust_pickles_export_lagrange_basis(curve, domainLog2);
-      if (bytes.length === 0) continue;
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(`${path}.tmp`, bytes);
-      fs.renameSync(`${path}.tmp`, path);
-    } catch {
-      // persisting is best-effort
-    }
-  }
+  persistSrsCacheEntries(cache, (curve, domainLog2) =>
+    domainLog2 === -1
+      ? b.rust_pickles_export_srs?.(curve)
+      : bindings.rust_pickles_export_lagrange_basis!(curve, domainLog2)
+  );
 }
 
 async function compileRecordedProgram(
@@ -1570,14 +1584,14 @@ async function compileRecordedProgram(
     if (profile)
       console.error(`[o1js compile] wasm bindings init: ${(performance.now() - tPhase).toFixed(0)}ms`);
     tPhase = performance.now();
-    // Read the cache files on the main thread, but run the wasm-side seeding
-    // inside the worker pool: the first seed call materializes the tick/tock
-    // SRS, whose parallel creation needs pool threads (and the main thread
-    // must not block in browsers).
-    let lagrangeSeeds = await readLagrangeCacheFiles();
+    // Read the cache entries on the main thread, but run the wasm-side
+    // seeding inside the worker pool: the first seed call materializes the
+    // tick/tock SRS, whose parallel creation needs pool threads (and the
+    // main thread must not block in browsers).
+    let lagrangeSeeds = readSrsCacheSeeds(cache);
     let seedInPool = () => seedLagrangeCaches(bindings, lagrangeSeeds);
     if (profile)
-      console.error(`[o1js compile] read lagrange files: ${(performance.now() - tPhase).toFixed(0)}ms`);
+      console.error(`[o1js compile] read srs cache entries: ${(performance.now() - tPhase).toFixed(0)}ms`);
     let hasRecursion = branches.some((branch) => branch.proofsVerified > 0);
     if (hasRecursion && bindings.rust_pickles_compile_recorded_program_shared !== undefined) {
       // OCaml `Pickles.compile` shape: ONE shared wrap circuit and canonical
@@ -1704,7 +1718,7 @@ async function compileRecordedProgram(
       if (profile)
         console.error(`[o1js compile] vk envelope: ${(performance.now() - tPhase).toFixed(0)}ms`);
       tPhase = performance.now();
-      await persistLagrangeCaches(bindings);
+      persistLagrangeCaches(bindings, cache);
       if (profile)
         console.error(`[o1js compile] persist lagrange: ${(performance.now() - tPhase).toFixed(0)}ms`);
       tPhase = performance.now();
@@ -1740,7 +1754,7 @@ async function compileRecordedProgram(
         return bindings.rust_pickles_compile_recorded_program!(branchesJson);
       });
       if (profile) console.error(`[o1js compile] rust batch compile done`);
-      await persistLagrangeCaches(bindings);
+      persistLagrangeCaches(bindings, cache);
       return Promise.all(
         recorded.map((entry, i) => {
           let [handle, n1Handle, n2Handle] = compiledHandles[i];
@@ -1770,6 +1784,19 @@ async function compileRecordedProgram(
   }
   let client = await minaRuntimeClient();
   let tRust = performance.now();
+  // SRS/Lagrange cache: same entries and gating as jsoo (best-effort — an
+  // older runtime without the seed/export ops just recomputes).
+  try {
+    for (let [curve, domainLog2, bytes] of readSrsCacheSeeds(cache)) {
+      client.seedSrsCache(
+        curve,
+        Buffer.from(bytes).toString('base64'),
+        domainLog2 === -1 ? undefined : domainLog2
+      );
+    }
+  } catch {
+    // seeding is best-effort
+  }
   let runtimeBranches = recorded.map((entry, i) => ({
     circuit: entry.circuit,
     witness: entry.witness,
@@ -1815,6 +1842,17 @@ async function compileRecordedProgram(
     } catch {
       // caching is best-effort
     }
+  }
+  try {
+    persistSrsCacheEntries(cache, (curve, domainLog2) => {
+      let { payloadBase64 } = client.exportSrsCache(
+        curve,
+        domainLog2 === -1 ? undefined : domainLog2
+      );
+      return payloadBase64 == null ? undefined : new Uint8Array(Buffer.from(payloadBase64, 'base64'));
+    });
+  } catch {
+    // persisting is best-effort
   }
   if (profile)
     console.error(
