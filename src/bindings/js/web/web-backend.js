@@ -206,15 +206,17 @@ async function workerCall(worker, type, message) {
 
 function allocateWasmMemoryForUserAgent(userAgent) {
   const isIOSDevice = /iPad|iPhone|iPod/.test(userAgent);
+  // The rust kimchi wasm declares a larger initial memory than the old
+  // jsoo-era module (24 pages at the time of writing); keep headroom.
   if (isIOSDevice) {
     return new WebAssembly.Memory({
-      initial: 20,
+      initial: 32,
       maximum: 16384, // 1 GiB
       shared: true,
     });
   } else {
     return new WebAssembly.Memory({
-      initial: 20,
+      initial: 32,
       maximum: 65536, // 4 GiB
       shared: true,
     });

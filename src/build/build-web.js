@@ -83,7 +83,7 @@ async function buildWeb({ production }) {
     format: 'esm',
     outfile: 'dist/web/index.js',
     resolveExtensions: ['.js', '.ts'],
-    plugins: [wasmPlugin(), srcStringPlugin()],
+    plugins: [wasmPlugin(), srcStringPlugin(), nodeStubPlugin()],
     dropLabels: ['CJS'],
     external: ['*.bc.js'],
     target,
@@ -145,6 +145,52 @@ function kimchiWasm() {
   ${src}
 }
 kimchiWasm.deps = [startWorkers, terminateWorkers]`;
+}
+
+// node:* imports only sit on dynamic node-only paths (native backend
+// loader, debug dumps); stub them so dist/web carries no node: scheme —
+// downstream bundlers (Next/webpack, vite) choke on it even when unused.
+function nodeStubPlugin() {
+  return {
+    name: 'node-stub-plugin',
+    setup(build) {
+      build.onResolve({ filter: /^node:(fs|module)$/ }, (args) => ({
+        path: args.path,
+        namespace: 'node-stub',
+      }));
+      // The whole native-backend subtree is node-only (its module top level
+      // calls createRequire); stub it as a proxy that only throws on USE.
+      build.onResolve({ filter: /native\/native(\.js)?$/ }, (args) => ({
+        path: 'native-stub',
+        namespace: 'native-stub',
+      }));
+      build.onLoad({ filter: /.*/, namespace: 'native-stub' }, () => ({
+        contents:
+          'const unavailable = new Proxy({}, {\n' +
+          '  get(_t, prop) {\n' +
+          "    throw new Error('the native backend is not available in the browser (' + String(prop) + ')');\n" +
+          '  },\n' +
+          '});\n' +
+          'export default unavailable;\n',
+        loader: 'js',
+      }));
+      build.onLoad({ filter: /.*/, namespace: 'node-stub' }, (args) => ({
+        contents:
+          // createRequire is CALLED at module top level by the (eagerly
+          // inlined) native loader, inside a try/catch around the actual
+          // require — so it must return a function that only throws when
+          // invoked. fs functions throw on call (node-only paths).
+          'function unavailable() {\n' +
+          "  throw new Error('" + args.path + " is not available in the browser');\n" +
+          '}\n' +
+          'export const createRequire = () => unavailable;\n' +
+          'export const writeFileSync = unavailable;\n' +
+          'export const readFileSync = unavailable;\n' +
+          'export default { createRequire: () => unavailable, writeFileSync: unavailable };\n',
+        loader: 'js',
+      }));
+    },
+  };
 }
 
 function wasmPlugin() {
