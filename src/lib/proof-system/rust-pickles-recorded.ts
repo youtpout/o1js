@@ -1815,6 +1815,30 @@ async function compileRecordedProgram(
       });
       if (profile) console.error(`[o1js compile] rust batch compile done`);
       persistLagrangeCaches(bindings, cache);
+      // A non-recursive program with several distinct branches (every branch
+      // `proofsVerified === 0`) has ONE shared width-0 wrap VK in OCaml
+      // `Pickles.compile`, not one wrap per branch. Compute it once and stamp
+      // it on every branch so a SmartContract's canonical-VK check sees a
+      // single key. Single-branch programs already match jsoo per-branch.
+      let sharedBaseVk: CanonicalVkEnvelope | undefined;
+      let sharedBaseVkBinding = (
+        bindings as unknown as {
+          rust_pickles_compile_recorded_program_base_shared_vk?: (json: string) => string;
+        }
+      ).rust_pickles_compile_recorded_program_base_shared_vk;
+      if (
+        recorded.length > 1 &&
+        branches.every((branch) => branch.proofsVerified === 0) &&
+        sharedBaseVkBinding !== undefined
+      ) {
+        let envelope = JSON.parse(
+          await runRustPickles(() => {
+            seedInPool();
+            return sharedBaseVkBinding!(branchesJson);
+          })
+        ) as { base64: string; hash: string };
+        sharedBaseVk = { data: envelope.base64, hash: envelope.hash };
+      }
       return Promise.all(
         recorded.map((entry, i) => {
           let [handle, n1Handle, n2Handle] = compiledHandles[i];
@@ -1823,6 +1847,7 @@ async function compileRecordedProgram(
             handle,
             n1Handle: n1Handle ?? undefined,
             n2Handle: n2Handle ?? undefined,
+            verificationKey: sharedBaseVk,
           });
         })
       );
