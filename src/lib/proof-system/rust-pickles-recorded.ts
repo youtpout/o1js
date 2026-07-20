@@ -665,9 +665,13 @@ async function recordCircuit(
       Snarky.field.assertSquare(y.value, z.value);
       return [y, isSquare];
     };
-    let [y1, b1] = sqrtFlagged(ySquared(x1));
-    let [y2, b2] = sqrtFlagged(ySquared(x2));
+    // OCaml `let y1,b1 = .. and y2,b2 = .. and y3,b3 = ..` evaluates and-bindings
+    // RIGHT-TO-LEFT, so the sqrt_flagged constraints are emitted for branch 3,
+    // then 2, then 1. Matching this order is what makes the kimchi double-generic
+    // packing line up with jsoo.
     let [y3, b3] = sqrtFlagged(ySquared(x3));
+    let [y2, b2] = sqrtFlagged(ySquared(x2));
+    let [y1, b1] = sqrtFlagged(ySquared(x1));
     // OCaml `Boolean.Assert.any [b1;b2;b3]` = `assert_non_zero (b1+b2+b3)` =
     // ONE constraint `numTrue * inv = 1` (not an or-chain + assertTrue). Use the
     // raw lincom + existsOne (no seal), matching OCaml `exists`.
@@ -677,11 +681,15 @@ async function recordCircuit(
       return n === 0n ? 0n : Fp.inverse(n) ?? 0n;
     }).value;
     Snarky.field.assertMul(numTrue, invTrue, FieldVar.constant(1n));
-    let x1f = b1.toField();
-    let x2f = b1.not().and(b2).toField();
+    // `let x1_is_first = .. and x2_is_first = .. and x3_is_first = ..` — again
+    // right-to-left: x3_is_first (2 ANDs) first, then x2_is_first (1 AND).
     let x3f = b1.not().and(b2.not()).and(b3).toField();
-    let gx = x1f.mul(x1).add(x2f.mul(x2)).add(x3f.mul(x3));
-    let gy = x1f.mul(y1).add(x2f.mul(y2)).add(x3f.mul(y3));
+    let x2f = b1.not().and(b2).toField();
+    let x1f = b1.toField();
+    // The result tuple `(gx, gy)` is evaluated right-to-left (gy first), and each
+    // sum `a*x1 + b*x2 + c*x3` is evaluated right-to-left (x3 term first).
+    let gy = x3f.mul(y3).add(x2f.mul(y2)).add(x1f.mul(y1));
+    let gx = x3f.mul(x3).add(x2f.mul(x2)).add(x1f.mul(x1));
     return [0, gx.value, gy.value];
   };
   poseidonApi.sponge.create = () => {
