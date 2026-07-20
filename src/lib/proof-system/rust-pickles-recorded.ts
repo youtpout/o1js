@@ -110,7 +110,10 @@ type RecordedConstraintJson =
   | {
       kind: 'lookup';
       row: RecordedLinCombJson[];
-    };
+    }
+  | { kind: 'xor16'; row: RecordedLinCombJson[] }
+  | { kind: 'rot64'; row: RecordedLinCombJson[]; two_to_rot: string }
+  | { kind: 'raw'; gate_type: number; row: RecordedLinCombJson[]; coeffs: string[] };
 
 type RecordedCircuitJson = {
   aux_count: number;
@@ -251,11 +254,8 @@ const unsupportedGates = [
   'ecScale',
   'ecEndoscale',
   'ecEndoscalar',
-  'xor',
-  'rotate',
   'foreignFieldAdd',
   'foreignFieldMul',
-  'raw',
 ] as const;
 
 function mlArrayToArray<T>(array: { length: number; [index: number]: T }): T[] {
@@ -415,6 +415,9 @@ async function recordCircuit(
     rangeCheck0: gates.rangeCheck0,
     rangeCheck1: gates.rangeCheck1,
     lookup: gates.lookup,
+    xor: gates.xor,
+    rotate: gates.rotate,
+    raw: gates.raw,
   };
   let originalGates = new Map<string, unknown>();
 
@@ -655,6 +658,68 @@ async function recordCircuit(
     let row = fieldVarsFromMlTuple('lookup', input, 7);
     recorder.constraints.push({ kind: 'lookup', row: row.map((cell) => recorder.lc(cell)) });
     return original.lookup.call(gates, input);
+  };
+  // Xor16 gate row: [in1, in2, out, in1_0..3, in2_0..3, out_0..3] (15 vars).
+  gates.xor = (
+    in1,
+    in2,
+    out,
+    in1_0,
+    in1_1,
+    in1_2,
+    in1_3,
+    in2_0,
+    in2_1,
+    in2_2,
+    in2_3,
+    out0,
+    out1,
+    out2,
+    out3
+  ) => {
+    let row = [
+      in1, in2, out,
+      in1_0, in1_1, in1_2, in1_3,
+      in2_0, in2_1, in2_2, in2_3,
+      out0, out1, out2, out3,
+    ];
+    recorder.constraints.push({ kind: 'xor16', row: row.map((cell) => recorder.lc(cell)) });
+    return original.xor.call(
+      gates,
+      in1, in2, out,
+      in1_0, in1_1, in1_2, in1_3,
+      in2_0, in2_1, in2_2, in2_3,
+      out0, out1, out2, out3
+    );
+  };
+  // Rot64 gate row: [word, rotated, excess, bound_limb0..3, bound_crumb0..7]
+  // (15 vars) + the 2^rot coefficient. `limbs`/`crumbs` arrive as MlArrays.
+  gates.rotate = (field_, rotated, excess, limbs, crumbs, two_to_rot) => {
+    let limbsArr = fieldVarsFromMlArray('rotate.limbs', limbs, 4);
+    let crumbsArr = fieldVarsFromMlArray('rotate.crumbs', crumbs, 8);
+    let row = [field_, rotated, excess, ...limbsArr, ...crumbsArr];
+    recorder.constraints.push({
+      kind: 'rot64',
+      row: row.map((cell) => recorder.lc(cell)),
+      two_to_rot: FieldConst.toBigint(two_to_rot).toString(),
+    });
+    return original.rotate.call(gates, field_, rotated, excess, limbs, crumbs, two_to_rot);
+  };
+  // Raw gate (o1js `Gates.raw`): an explicit KimchiGateType tag with its (padded
+  // to 15) values and coefficients. Used e.g. for the trailing `Zero` row of an
+  // XOR chain.
+  gates.raw = (kind, values, coefficients) => {
+    let row = fieldVarsFromMlArray('raw.values', values);
+    let coeffs = mlArrayToArray<FieldConst>(
+      coefficients as { length: number; [index: number]: FieldConst }
+    );
+    recorder.constraints.push({
+      kind: 'raw',
+      gate_type: kind as number,
+      row: row.map((cell) => recorder.lc(cell)),
+      coeffs: coeffs.map((c) => FieldConst.toBigint(c).toString()),
+    });
+    return original.raw.call(gates, kind, values, coefficients);
   };
   for (let name of unsupportedGates) {
     let gate = (gates as Record<string, unknown>)[name];
