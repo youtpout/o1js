@@ -120,6 +120,17 @@ type RecordedConstraintJson =
       curr: RecordedLinCombJson[];
       next: RecordedLinCombJson[];
       coeffs: string[];
+    }
+  | {
+      kind: 'ec_scale';
+      rounds: {
+        accs: [RecordedLinCombJson, RecordedLinCombJson][];
+        bits: RecordedLinCombJson[];
+        ss: RecordedLinCombJson[];
+        base: [RecordedLinCombJson, RecordedLinCombJson];
+        n_prev: RecordedLinCombJson;
+        n_next: RecordedLinCombJson;
+      }[];
     };
 
 type RecordedCircuitJson = {
@@ -715,6 +726,152 @@ async function recordCircuit(
     throw Error('Rust Pickles recorder: Poseidon.Sponge is not supported yet');
   };
 
+  // `Group.scale` (used by `Signature.verify`, side-loaded VK checks, ...) calls
+  // the native `Snarky.group.scaleFastUnpack` = the VarBaseMul (`EcScale`)
+  // gadget: computes `(2*s + 1 + 2^numBits) * P` and returns the proven LSB-first
+  // bits of s. Port of pickles' `scale_fast_unpack` / `scale_fast_core`
+  // (plonk_curve_ops.rs) so the rust backend re-emits the identical VarBaseMul
+  // rows (the surrounding shift/edge-case TS in native-curve.ts is recorded
+  // through the normal Field hooks).
+  let groupApi = Snarky.group as {
+    scaleFastUnpack: (P: unknown, shiftedValue: unknown, numBits: number) => unknown;
+  };
+  let originalScaleFastUnpack = groupApi.scaleFastUnpack;
+  const BITS_PER_CHUNK = 5;
+  let fpInv = (x: bigint) => Fp.inverse(x) ?? 0n;
+  let sealFieldVar = (fv: FieldVar): FieldVar => new Field(fv).seal().value;
+  // Records a kimchi `CompleteAdd` gate for p1 + p2 (handles doubling), in
+  // OCaml add_fast's exists order (same_x, inf_z, x21_inv, slope, x3, y3), inf=0.
+  let recordAddComplete = (
+    p1: [FieldVar, FieldVar],
+    p2: [FieldVar, FieldVar]
+  ): { x: FieldVar; y: FieldVar } => {
+    let w = () => {
+      let x1 = readVarBigint(p1[0]);
+      let y1 = readVarBigint(p1[1]);
+      let x2 = readVarBigint(p2[0]);
+      let y2 = readVarBigint(p2[1]);
+      let sameX = x1 === x2;
+      let x21Inv = sameX ? 0n : fpInv(Fp.sub(x2, x1));
+      let slope = sameX
+        ? Fp.mul(Fp.mul(Fp.mul(x1, x1), 3n), fpInv(Fp.add(y1, y1)))
+        : Fp.mul(Fp.sub(y2, y1), x21Inv);
+      let infZ = y1 === y2 ? 0n : sameX ? fpInv(Fp.sub(y1, y2)) : 0n;
+      let x3 = Fp.sub(Fp.sub(Fp.square(slope), x1), x2);
+      let y3 = Fp.sub(Fp.mul(slope, Fp.sub(x1, x3)), y1);
+      return { sameX: sameX ? 1n : 0n, infZ, x21Inv, slope, x3, y3 };
+    };
+    let sameX = existsOne(() => w().sameX).value;
+    let inf = FieldVar.constant(0n);
+    let infZ = existsOne(() => w().infZ).value;
+    let x21Inv = existsOne(() => w().x21Inv).value;
+    let slope = existsOne(() => w().slope).value;
+    let x3 = existsOne(() => w().x3).value;
+    let y3 = existsOne(() => w().y3).value;
+    recorder.constraints.push({
+      kind: 'ec_add_complete',
+      p1: [recorder.lc(p1[0]), recorder.lc(p1[1])],
+      p2: [recorder.lc(p2[0]), recorder.lc(p2[1])],
+      p3: [recorder.lc(x3), recorder.lc(y3)],
+      inf: recorder.lc(inf),
+      same_x: recorder.lc(sameX),
+      slope: recorder.lc(slope),
+      inf_z: recorder.lc(infZ),
+      x21_inv: recorder.lc(x21Inv),
+    });
+    return { x: x3, y: y3 };
+  };
+  groupApi.scaleFastUnpack = (Pml, shiftedMl, numBits) => {
+    let [baseXraw, baseYraw] = fieldVarsFromMlArray('scaleFastUnpack.P', Pml, 2);
+    let [scalar] = fieldVarsFromMlArray('scaleFastUnpack.shifted', shiftedMl, 1);
+    // witness the MSB-first bits of the scalar
+    let bitVars: FieldVar[] = [];
+    for (let i = 0; i < numBits; i++) {
+      let idx = numBits - 1 - i;
+      bitVars.push(existsOne(() => (readVarBigint(scalar) >> BigInt(idx)) & 1n).value);
+    }
+    // add_fast seals both points (y before x); base is used as both operands
+    let yBase = sealFieldVar(baseYraw);
+    let xBase = sealFieldVar(baseXraw);
+    // acc = 2 * base
+    let acc = recordAddComplete([xBase, yBase], [xBase, yBase]);
+    let nAcc: FieldVar = FieldVar.constant(0n);
+    let rounds: {
+      accs: [RecordedLinCombJson, RecordedLinCombJson][];
+      bits: RecordedLinCombJson[];
+      ss: RecordedLinCombJson[];
+      base: [RecordedLinCombJson, RecordedLinCombJson];
+      n_prev: RecordedLinCombJson;
+      n_next: RecordedLinCombJson;
+    }[] = [];
+    let chunks = numBits / BITS_PER_CHUNK;
+    for (let chunk = 0; chunk < chunks; chunk++) {
+      let bs = bitVars.slice(chunk * BITS_PER_CHUNK, (chunk + 1) * BITS_PER_CHUNK);
+      let nAccPrev = nAcc;
+      nAcc = existsOne(() => {
+        let n = readVarBigint(nAccPrev);
+        for (let b of bs) n = Fp.add(Fp.add(n, n), readVarBigint(b));
+        return n;
+      }).value;
+      let accs: [FieldVar, FieldVar][] = [[acc.x, acc.y]];
+      let slopes: FieldVar[] = [];
+      for (let b of bs) {
+        let xAcc = acc.x;
+        let yAcc = acc.y;
+        // acc' = 2*acc + (2b - 1)*base, via two slopes as in the VarBaseMul gate
+        let s1 = existsOne(() => {
+          let ya = readVarBigint(yAcc);
+          let yb = readVarBigint(yBase);
+          let bb = readVarBigint(b);
+          let xa = readVarBigint(xAcc);
+          let xb = readVarBigint(xBase);
+          return Fp.mul(Fp.sub(ya, Fp.mul(yb, Fp.sub(Fp.add(bb, bb), 1n))), fpInv(Fp.sub(xa, xb)));
+        }).value;
+        let s1sq = existsOne(() => Fp.square(readVarBigint(s1))).value;
+        let s2 = existsOne(() => {
+          let ya = readVarBigint(yAcc);
+          let xa = readVarBigint(xAcc);
+          let xb = readVarBigint(xBase);
+          let s1s = readVarBigint(s1sq);
+          let s1v = readVarBigint(s1);
+          return Fp.sub(
+            Fp.mul(Fp.add(ya, ya), fpInv(Fp.sub(Fp.add(Fp.add(xa, xa), xb), s1s))),
+            s1v
+          );
+        }).value;
+        let xRes = existsOne(() => {
+          let xb = readVarBigint(xBase);
+          let s2v = readVarBigint(s2);
+          let s1s = readVarBigint(s1sq);
+          return Fp.sub(Fp.add(xb, Fp.square(s2v)), s1s);
+        }).value;
+        let yRes = existsOne(() => {
+          let xa = readVarBigint(xAcc);
+          let xr = readVarBigint(xRes);
+          let s2v = readVarBigint(s2);
+          let ya = readVarBigint(yAcc);
+          return Fp.sub(Fp.mul(Fp.sub(xa, xr), s2v), ya);
+        }).value;
+        acc = { x: xRes, y: yRes };
+        accs.push([acc.x, acc.y]);
+        slopes.push(s1);
+      }
+      rounds.push({
+        accs: accs.map(([x, y]) => [recorder.lc(x), recorder.lc(y)]),
+        bits: bs.map((bb) => recorder.lc(bb)),
+        ss: slopes.map((s) => recorder.lc(s)),
+        base: [recorder.lc(xBase), recorder.lc(yBase)],
+        n_prev: recorder.lc(nAccPrev),
+        n_next: recorder.lc(nAcc),
+      });
+    }
+    recorder.constraints.push({ kind: 'ec_scale', rounds });
+    // the VarBaseMul gadget also constrains the recomposed scalar
+    Snarky.field.assertEqual(nAcc, scalar);
+    let bitsLsb = bitVars.slice().reverse();
+    return [0, [0, acc.x, acc.y], [0, ...bitsLsb]];
+  };
+
   gates.ecAdd = (p1, p2, p3, inf, same_x, slope, inf_z, x21_inv) => {
     let [p1x, p1y] = fieldVarsFromMlTuple('ecAdd.p1', p1, 2);
     let [p2x, p2y] = fieldVarsFromMlTuple('ecAdd.p2', p2, 2);
@@ -978,6 +1135,7 @@ async function recordCircuit(
     poseidonApi.sponge.create = originalPoseidon.spongeCreate;
     poseidonApi.sponge.absorb = originalPoseidon.spongeAbsorb;
     poseidonApi.sponge.squeeze = originalPoseidon.spongeSqueeze;
+    groupApi.scaleFastUnpack = originalScaleFastUnpack;
     gates.ecAdd = original.ecAdd;
     gates.rangeCheck0 = original.rangeCheck0;
     gates.rangeCheck1 = original.rangeCheck1;
