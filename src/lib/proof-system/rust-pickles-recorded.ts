@@ -393,6 +393,11 @@ async function recordCircuit(
   { validateWitness = true } = {}
 ): Promise<{ circuit: RecordedCircuitJson; witness: string[] }> {
   await initializeBindings();
+  // Loaded lazily (proof-system -> provable would be a static import cycle);
+  // by the time the circuit runs these are fully initialized.
+  const { Field } = await import('../provable/field.js');
+  const { Bool } = await import('../provable/bool.js');
+  const { Provable } = await import('../provable/provable.js');
   let recorder = new CircuitRecorder();
   recordedPreviousStateFields = undefined;
   recordedSideLoadedVks = undefined;
@@ -604,8 +609,79 @@ async function recordCircuit(
     }
     return [0, ...state];
   };
-  poseidonApi.hashToGroup = () => {
-    throw Error('Rust Pickles recorder: Poseidon.hashToGroup is not supported yet');
+  // Group map non-residue: the smallest i >= 2 that is not a square in Fp
+  // (OCaml `Aux.non_residue`).
+  let groupMapNonResidue = (() => {
+    let i = 2n;
+    while (Fp.isSquare(i)) i += 1n;
+    return i;
+  })();
+  // Reimplements `Poseidon.hashToGroup` (snarky_bindings `hash_to_group` =
+  // `Random_oracle.Checked.hash` + `Group_map.Checked.to_group`) via the hooked
+  // primitives, so the app-circuit constraints are recorded. Group-map algorithm
+  // = checked_map.ml `wrap` + the Pallas conic map (elliptic-curve.ts).
+  poseidonApi.hashToGroup = (mlInput: unknown) => {
+    let inputVars = fieldVarsFromMlArray('hashToGroup.input', mlInput);
+    // hash = Poseidon.hash(input) = update([0,0,0], input).state[0]
+    let zero = () => FieldVar.constant(0n);
+    let updated = poseidonApi.update(
+      [0, zero(), zero(), zero()],
+      [0, ...inputVars]
+    ) as [number, FieldVar, FieldVar, FieldVar];
+    let t = new Field(updated[1]);
+
+    // --- group map (checked_map.ml) ---
+    const conic_c = 3n;
+    const z0 = 12196889842669319921865617096620076994180062626450149327690483414064673774441n;
+    const y0 = 1n; // projection_point.y
+    const u = 2n;
+    const u_over_2 = 1n;
+    const bParam = 5n; // spec.b (a = 0)
+    const m = groupMapNonResidue;
+
+    // field_to_conic(t)
+    let ct = t.mul(conic_c);
+    let d1 = ct.mul(y0).add(z0);
+    let d2 = ct.mul(t).add(1n);
+    let d = d1.div(d2);
+    let s = d.mul(2n);
+    let conic_z = Field.from(z0).sub(s);
+    let conic_y = Field.from(y0).sub(s.mul(t));
+    // conic_to_s(conic)
+    let dd = conic_z.div(conic_y);
+    let v = dd.sub(u_over_2);
+    // sToVTruncated: x1 = v, x2 = -(u+v), x3 = u + y^2
+    let x1 = v;
+    let x2 = v.add(u).neg();
+    let x3 = conic_y.square().add(u);
+
+    // y_squared(x) = x^3 + b, then sqrt_flagged
+    let ySquared = (x: InstanceType<typeof Field>) => x.mul(x).mul(x).add(bParam);
+    let sqrtFlagged = (ysq: InstanceType<typeof Field>): [InstanceType<typeof Field>, InstanceType<typeof Bool>] => {
+      let isSquare = Provable.witness(Bool, () => new Bool(Fp.isSquare(ysq.toBigInt())));
+      let z = Provable.if(isSquare, ysq, ysq.mul(m));
+      let y = Provable.witness(Field, () => Field.from(Fp.sqrt(z.toBigInt()) ?? 0n));
+      Snarky.field.assertSquare(y.value, z.value);
+      return [y, isSquare];
+    };
+    let [y1, b1] = sqrtFlagged(ySquared(x1));
+    let [y2, b2] = sqrtFlagged(ySquared(x2));
+    let [y3, b3] = sqrtFlagged(ySquared(x3));
+    // OCaml `Boolean.Assert.any [b1;b2;b3]` = `assert_non_zero (b1+b2+b3)` =
+    // ONE constraint `numTrue * inv = 1` (not an or-chain + assertTrue). Use the
+    // raw lincom + existsOne (no seal), matching OCaml `exists`.
+    let numTrue = FieldVar.add(FieldVar.add(b1.value, b2.value), b3.value);
+    let invTrue = existsOne(() => {
+      let n = readVarBigint(numTrue);
+      return n === 0n ? 0n : Fp.inverse(n) ?? 0n;
+    }).value;
+    Snarky.field.assertMul(numTrue, invTrue, FieldVar.constant(1n));
+    let x1f = b1.toField();
+    let x2f = b1.not().and(b2).toField();
+    let x3f = b1.not().and(b2.not()).and(b3).toField();
+    let gx = x1f.mul(x1).add(x2f.mul(x2)).add(x3f.mul(x3));
+    let gy = x1f.mul(y1).add(x2f.mul(y2)).add(x3f.mul(y3));
+    return [0, gx.value, gy.value];
   };
   poseidonApi.sponge.create = () => {
     throw Error('Rust Pickles recorder: Poseidon.Sponge is not supported yet');
