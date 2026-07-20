@@ -661,8 +661,19 @@ async function recordCircuit(
     // y_squared(x) = x^3 + b, then sqrt_flagged
     let ySquared = (x: InstanceType<typeof Field>) => x.mul(x).mul(x).add(bParam);
     let sqrtFlagged = (ysq: InstanceType<typeof Field>): [InstanceType<typeof Field>, InstanceType<typeof Bool>] => {
+      // OCaml `sqrt_exn (Field.if_ is_square ~then_:ysq ~else_:(scale ysq m))`:
+      // a SINGLE R1CS `assert_r1cs is_square (ysq - m*ysq) (z - m*ysq)`. Routing
+      // through Snarky.field.assertMul (recorded as `r1cs`) makes the rust
+      // reduce_lincom seal `(z - m*ysq)` EXACTLY like OCaml's plonk_constraint_
+      // system (o1js `Provable.if` instead seals `z` itself, an equivalent but
+      // opposite-signed layout). Values are read only inside witness callbacks.
       let isSquare = Provable.witness(Bool, () => new Bool(Fp.isSquare(ysq.toBigInt())));
-      let z = Provable.if(isSquare, ysq, ysq.mul(m));
+      let elseV = ysq.mul(m);
+      let z = Provable.witness(Field, () => {
+        let v = ysq.toBigInt();
+        return Field.from(Fp.isSquare(v) ? v : Fp.mul(m, v));
+      });
+      Snarky.field.assertMul(isSquare.value, ysq.sub(elseV).value, z.sub(elseV).value);
       let y = Provable.witness(Field, () => Field.from(Fp.sqrt(z.toBigInt()) ?? 0n));
       Snarky.field.assertSquare(y.value, z.value);
       return [y, isSquare];
@@ -680,13 +691,16 @@ async function recordCircuit(
       return n === 0n ? 0n : Fp.inverse(n) ?? 0n;
     }).value;
     Snarky.field.assertMul(numTrue, invTrue, FieldVar.constant(1n));
-    // `let x1_is_first = .. and x2_is_first = .. and x3_is_first = ..` — again
-    // right-to-left: x3_is_first (2 ANDs) first, then x2_is_first (1 AND).
-    let x3f = b1.not().and(b2.not()).and(b3).toField();
-    let x2f = b1.not().and(b2).toField();
+    // x1_is_first = b1, x2_is_first = (not b1) && b2, x3_is_first = (not b1) &&
+    // (not b2) && b3 — the flag AND-bindings are emitted left-to-right (x1,x2,x3).
     let x1f = b1.toField();
+    let x2f = b1.not().and(b2).toField();
+    // OCaml `&&` is RIGHT-associative: `(not b1) && (not b2) && b3` parses as
+    // `(not b1) && ((not b2) && b3)`, which interleaves the not-seal and the AND
+    // (LIN,MUL,LIN,MUL) instead of grouping them (LIN,LIN,MUL,MUL).
+    let x3f = b1.not().and(b2.not().and(b3)).toField();
     // The result tuple `(gx, gy)` is evaluated right-to-left (gy first), and each
-    // sum `a*x1 + b*x2 + c*x3` is evaluated right-to-left (x3 term first).
+    // sum `a*x1 + b*x2 + c*x3` right-to-left (x3 term first).
     let gy = x3f.mul(y3).add(x2f.mul(y2)).add(x1f.mul(y1));
     let gx = x3f.mul(x3).add(x2f.mul(x2)).add(x1f.mul(x1));
     return [0, gx.value, gy.value];
