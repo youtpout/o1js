@@ -70,6 +70,12 @@ type RecordedConstraintJson =
   | { kind: 'boolean'; v: RecordedLinCombJson }
   | { kind: 'equal'; l: RecordedLinCombJson; r: RecordedLinCombJson }
   | { kind: 'square'; v: RecordedLinCombJson; square: RecordedLinCombJson }
+  | {
+      kind: 'endoscalar';
+      input: RecordedLinCombJson;
+      output: RecordedLinCombJson;
+      num_bits: number;
+    }
   | { kind: 'r1cs'; a: RecordedLinCombJson; b: RecordedLinCombJson; c: RecordedLinCombJson }
   | {
       kind: 'generic';
@@ -393,6 +399,11 @@ async function recordCircuit(
 
   let field = Snarky.field;
   let gates = Snarky.gates;
+  let originalTruncateToBits16 = (
+    field as unknown as {
+      truncateToBits16: (lengthDiv16: number, x: FieldVar) => FieldVar;
+    }
+  ).truncateToBits16;
   let original = {
     assertEqual: field.assertEqual,
     assertMul: field.assertMul,
@@ -427,6 +438,26 @@ async function recordCircuit(
   field.assertBoolean = (x) => {
     recorder.constraints.push({ kind: 'boolean', v: recorder.lc(x) });
     if (validateWitness) return original.assertBoolean.call(field, x);
+  };
+  // `Snarky.field.truncateToBits16` (OCaml `Scalar_challenge.to_field_checked'`,
+  // used by every UInt range check) emits `EndoMulScalar` rows entirely in
+  // OCaml — invisible to the gate hooks above. Always run the original to get
+  // the recomposed value the circuit consumes, and record an `endoscalar`
+  // constraint the rust backend re-emits (so recorded SmartContracts match
+  // jsoo's Step circuit instead of silently dropping these rows).
+  (
+    field as unknown as {
+      truncateToBits16: (lengthDiv16: number, x: FieldVar) => FieldVar;
+    }
+  ).truncateToBits16 = (lengthDiv16, x) => {
+    let result = originalTruncateToBits16.call(field, lengthDiv16, x);
+    recorder.constraints.push({
+      kind: 'endoscalar',
+      input: recorder.lc(x),
+      output: recorder.lc(result),
+      num_bits: lengthDiv16 * 16,
+    });
+    return result;
   };
   gates.generic = (cl, l, cr, r, co, o, m, c) => {
     recorder.constraints.push({
@@ -702,6 +733,11 @@ async function recordCircuit(
     field.assertMul = original.assertMul;
     field.assertSquare = original.assertSquare;
     field.assertBoolean = original.assertBoolean;
+    (
+      field as unknown as {
+        truncateToBits16: (lengthDiv16: number, x: FieldVar) => FieldVar;
+      }
+    ).truncateToBits16 = originalTruncateToBits16;
     gates.generic = original.generic;
     gates.poseidon = original.poseidon;
     run.enterAsProver = originalEnterAsProver;
