@@ -639,12 +639,13 @@ async function recordCircuit(
     const bParam = 5n; // spec.b (a = 0)
     const m = groupMapNonResidue;
 
-    // field_to_conic(t)
+    // field_to_conic(t): OCaml `s = of_int 2 * ((ct*y0)+z0) / ((ct*t)+one)`
+    // is left-associative => `s = (2 * numInner) / denom` (scale numerator
+    // BEFORE the divide, so the constant 2 folds into the numerator lincom).
     let ct = t.mul(conic_c);
-    let d1 = ct.mul(y0).add(z0);
-    let d2 = ct.mul(t).add(1n);
-    let d = d1.div(d2);
-    let s = d.mul(2n);
+    let numInner = ct.mul(y0).add(z0);
+    let denom = ct.mul(t).add(1n);
+    let s = numInner.mul(2n).div(denom);
     let conic_z = Field.from(z0).sub(s);
     let conic_y = Field.from(y0).sub(s.mul(t));
     // conic_to_s(conic)
