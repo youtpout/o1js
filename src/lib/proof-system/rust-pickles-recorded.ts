@@ -350,6 +350,9 @@ class CircuitRecorder {
 
   circuit(output: RecordedLinCombJson[]): RecordedCircuitJson {
     return {
+      // NOTE: some gadgets (e.g. foreign-field `assertLessThan` reached through
+      // `Group.scale` -> `isOddAndHigh`) push constraints AFTER this point, so
+      // `aux_count` is finalized by the caller once all lc's have run.
       aux_count: this.witness.length,
       output,
       constraints: this.constraints,
@@ -1113,6 +1116,10 @@ async function recordCircuit(
     circuit.previous_state_slots = previous_state_slots;
     circuit.previous_proof_widths = (recordedPreviousProofWidths as number[] | undefined) ?? [];
     recordedPreviousProofWidths = undefined;
+    // Deferred gadgets (foreign-field assertLessThan via Group.scale, ...) can
+    // lc new vars after `recorder.circuit()` ran; finalize aux_count now that
+    // every constraint has been recorded.
+    circuit.aux_count = recorder.witness.length;
     return { circuit, witness: recorder.witness };
   } finally {
     structureOnlyPass = false;
@@ -2046,6 +2053,11 @@ async function compileRecordedProgram(
     // re-recording produce byte-identical circuit JSON.
     recorded.push(await recordCircuit(branch.circuit, { validateWitness: false }));
   }
+  // Deferred gadgets (foreign-field `assertLessThan` reached through
+  // `Group.scale` -> `isOddAndHigh`) lc new witness vars after each branch's
+  // `recorder.circuit()` ran — the `witness` arrays keep growing. Finalize
+  // aux_count now that every branch (and its deferred constraints) is recorded.
+  for (let entry of recorded) entry.circuit.aux_count = entry.witness.length;
   if (profile) console.error(`[o1js compile] recording: ${(performance.now() - tRecord).toFixed(0)}ms`);
   let branchDump =
     typeof process !== 'undefined' ? process.env.O1JS_DUMP_PROGRAM_BRANCHES : undefined;
