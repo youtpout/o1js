@@ -113,7 +113,14 @@ type RecordedConstraintJson =
     }
   | { kind: 'xor16'; row: RecordedLinCombJson[] }
   | { kind: 'rot64'; row: RecordedLinCombJson[]; two_to_rot: string }
-  | { kind: 'raw'; gate_type: number; row: RecordedLinCombJson[]; coeffs: string[] };
+  | { kind: 'raw'; gate_type: number; row: RecordedLinCombJson[]; coeffs: string[] }
+  | { kind: 'foreign_field_add'; row: RecordedLinCombJson[]; coeffs: string[] }
+  | {
+      kind: 'foreign_field_mul';
+      curr: RecordedLinCombJson[];
+      next: RecordedLinCombJson[];
+      coeffs: string[];
+    };
 
 type RecordedCircuitJson = {
   aux_count: number;
@@ -250,13 +257,7 @@ async function minaRuntimeClient() {
 }
 
 /** The gates the recorder does not capture yet — calling one during recording is an error. */
-const unsupportedGates = [
-  'ecScale',
-  'ecEndoscale',
-  'ecEndoscalar',
-  'foreignFieldAdd',
-  'foreignFieldMul',
-] as const;
+const unsupportedGates = ['ecScale', 'ecEndoscale', 'ecEndoscalar'] as const;
 
 function mlArrayToArray<T>(array: { length: number; [index: number]: T }): T[] {
   return Array.prototype.slice.call(array, 1);
@@ -418,6 +419,8 @@ async function recordCircuit(
     xor: gates.xor,
     rotate: gates.rotate,
     raw: gates.raw,
+    foreignFieldAdd: gates.foreignFieldAdd,
+    foreignFieldMul: gates.foreignFieldMul,
   };
   let originalGates = new Map<string, unknown>();
 
@@ -720,6 +723,72 @@ async function recordCircuit(
       coeffs: coeffs.map((c) => FieldConst.toBigint(c).toString()),
     });
     return original.raw.call(gates, kind, values, coefficients);
+  };
+  // ForeignFieldAdd row: [left0..2, right0..2, field_overflow, carry], coeffs
+  // [modulus0..2, sign].
+  gates.foreignFieldAdd = (left, right, overflow, carry, modulus, sign) => {
+    let l = fieldVarsFromMlTuple('ffadd.left', left, 3);
+    let r = fieldVarsFromMlTuple('ffadd.right', right, 3);
+    let row = [...l, ...r, overflow, carry] as FieldVar[];
+    let modArr = mlTupleToArray<FieldConst>(
+      modulus as { length: number; [index: number]: FieldConst }
+    );
+    recorder.constraints.push({
+      kind: 'foreign_field_add',
+      row: row.map((cell) => recorder.lc(cell)),
+      coeffs: [
+        ...modArr.map((c) => FieldConst.toBigint(c).toString()),
+        FieldConst.toBigint(sign as FieldConst).toString(),
+      ],
+    });
+    return original.foreignFieldAdd.call(gates, left, right, overflow, carry, modulus, sign);
+  };
+  // ForeignFieldMul: current row + trailing Zero row, in the kimchi column
+  // layout (plonk_constraint_system.ml). coeffs [modulus2, negModulus0..2].
+  gates.foreignFieldMul = (
+    left,
+    right,
+    remainder,
+    quotient,
+    quotientHiBound,
+    product1,
+    carry0,
+    carry1p,
+    carry1c,
+    mod2,
+    negMod
+  ) => {
+    let l = fieldVarsFromMlTuple('ffmul.left', left, 3);
+    let r = fieldVarsFromMlTuple('ffmul.right', right, 3);
+    let rem = fieldVarsFromMlTuple('ffmul.remainder', remainder, 2);
+    let q = fieldVarsFromMlTuple('ffmul.quotient', quotient, 3);
+    let p1 = fieldVarsFromMlTuple('ffmul.product1', product1, 3);
+    let c1p = fieldVarsFromMlTuple('ffmul.carry1p', carry1p, 7);
+    let c1c = fieldVarsFromMlTuple('ffmul.carry1c', carry1c, 4);
+    let curr = [
+      l[0], l[1], l[2], r[0], r[1], r[2], p1[0],
+      c1p[0], c1p[1], c1p[2], c1p[3], c1c[0], c1c[1], c1c[2], c1c[3],
+    ] as FieldVar[];
+    let next = [
+      rem[0], rem[1], q[0], q[1], q[2], quotientHiBound, p1[1], p1[2],
+      c1p[4], c1p[5], c1p[6], carry0,
+    ] as FieldVar[];
+    recorder.constraints.push({
+      kind: 'foreign_field_mul',
+      curr: curr.map((cell) => recorder.lc(cell)),
+      next: next.map((cell) => recorder.lc(cell)),
+      coeffs: [
+        FieldConst.toBigint(mod2 as FieldConst).toString(),
+        ...mlTupleToArray<FieldConst>(
+          negMod as { length: number; [index: number]: FieldConst }
+        ).map((c) => FieldConst.toBigint(c).toString()),
+      ],
+    });
+    return original.foreignFieldMul.call(
+      gates,
+      left, right, remainder, quotient, quotientHiBound, product1,
+      carry0, carry1p, carry1c, mod2, negMod
+    );
   };
   for (let name of unsupportedGates) {
     let gate = (gates as Record<string, unknown>)[name];
