@@ -651,10 +651,12 @@ async function recordCircuit(
     // conic_to_s(conic)
     let dd = conic_z.div(conic_y);
     let v = dd.sub(u_over_2);
-    // sToVTruncated: x1 = v, x2 = -(u+v), x3 = u + y^2
+    // sToVTruncated: x1 = v, x2 = -(u+v), x3 = u + y^2. OCaml `u + (y*y)` uses a
+    // plain Field mul (Generic gate), NOT `Field.square` (which would emit a
+    // dedicated Square gate and drop this term out of the Generic stream).
     let x1 = v;
     let x2 = v.add(u).neg();
-    let x3 = conic_y.square().add(u);
+    let x3 = conic_y.mul(conic_y).add(u);
 
     // y_squared(x) = x^3 + b, then sqrt_flagged
     let ySquared = (x: InstanceType<typeof Field>) => x.mul(x).mul(x).add(bParam);
@@ -665,13 +667,10 @@ async function recordCircuit(
       Snarky.field.assertSquare(y.value, z.value);
       return [y, isSquare];
     };
-    // OCaml `let y1,b1 = .. and y2,b2 = .. and y3,b3 = ..` evaluates and-bindings
-    // RIGHT-TO-LEFT, so the sqrt_flagged constraints are emitted for branch 3,
-    // then 2, then 1. Matching this order is what makes the kimchi double-generic
-    // packing line up with jsoo.
-    let [y3, b3] = sqrtFlagged(ySquared(x3));
-    let [y2, b2] = sqrtFlagged(ySquared(x2));
+    // sqrt_flagged is emitted for branch 1, then 2, then 3 (x3 processed last).
     let [y1, b1] = sqrtFlagged(ySquared(x1));
+    let [y2, b2] = sqrtFlagged(ySquared(x2));
+    let [y3, b3] = sqrtFlagged(ySquared(x3));
     // OCaml `Boolean.Assert.any [b1;b2;b3]` = `assert_non_zero (b1+b2+b3)` =
     // ONE constraint `numTrue * inv = 1` (not an or-chain + assertTrue). Use the
     // raw lincom + existsOne (no seal), matching OCaml `exists`.
