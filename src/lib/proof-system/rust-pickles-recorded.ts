@@ -1147,6 +1147,17 @@ async function recordCircuit(
     gates.rangeCheck0 = original.rangeCheck0;
     gates.rangeCheck1 = original.rangeCheck1;
     gates.lookup = original.lookup;
+    // These were previously NOT restored, so the hook leaked across
+    // recordCircuit calls: the next branch captured this branch's hook as its
+    // `original.*` and called it, appending the next branch's gates to THIS
+    // branch's constraint array — corrupting the FIRST branch of any
+    // multi-method program that uses xor/rot/foreign-field gates (e.g. a
+    // SmartContract whose signature verify pulls in foreign-field mul).
+    gates.xor = original.xor;
+    gates.rotate = original.rotate;
+    gates.raw = original.raw;
+    gates.foreignFieldAdd = original.foreignFieldAdd;
+    gates.foreignFieldMul = original.foreignFieldMul;
     for (let [name, gate] of originalGates) {
       (gates as Record<string, unknown>)[name] = gate;
     }
