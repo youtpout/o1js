@@ -2259,23 +2259,36 @@ async function compileRecordedProgram(
       // it on every branch so a SmartContract's canonical-VK check sees a
       // single key. Single-branch programs already match jsoo per-branch.
       let sharedBaseVk: CanonicalVkEnvelope | undefined;
-      let sharedBaseVkBinding = (
-        bindings as unknown as {
-          rust_pickles_compile_recorded_program_base_shared_vk?: (json: string) => string;
-        }
-      ).rust_pickles_compile_recorded_program_base_shared_vk;
-      if (
-        recorded.length > 1 &&
-        branches.every((branch) => branch.proofsVerified === 0) &&
-        sharedBaseVkBinding !== undefined
-      ) {
-        let envelope = JSON.parse(
-          await runRustPickles(() => {
-            seedInPool();
-            return sharedBaseVkBinding!(branchesJson);
-          })
-        ) as { base64: string; hash: string };
+      let wantsSharedBaseVk =
+        recorded.length > 1 && branches.every((branch) => branch.proofsVerified === 0);
+      // The batch compile appends the shared base VK as a trailing element
+      // (index `recorded.length`), reusing the Step verifiers it already built.
+      // This avoids a second full Step compile of every branch, which fits in
+      // native memory but overruns wasm32's 4 GB linear memory and thrashes
+      // (a 12-branch SmartContract like Lumina's PoolFactory hung for minutes).
+      if (wantsSharedBaseVk && compiledHandles.length > recorded.length) {
+        let envelope = JSON.parse(compiledHandles[recorded.length] as unknown as string) as {
+          base64: string;
+          hash: string;
+        };
         sharedBaseVk = { data: envelope.base64, hash: envelope.hash };
+      } else if (wantsSharedBaseVk) {
+        // Fallback for runtimes whose batch compile predates the appended VK:
+        // the standalone binding recompiles every branch's Step circuit.
+        let sharedBaseVkBinding = (
+          bindings as unknown as {
+            rust_pickles_compile_recorded_program_base_shared_vk?: (json: string) => string;
+          }
+        ).rust_pickles_compile_recorded_program_base_shared_vk;
+        if (sharedBaseVkBinding !== undefined) {
+          let envelope = JSON.parse(
+            await runRustPickles(() => {
+              seedInPool();
+              return sharedBaseVkBinding!(branchesJson);
+            })
+          ) as { base64: string; hash: string };
+          sharedBaseVk = { data: envelope.base64, hash: envelope.hash };
+        }
       }
       return Promise.all(
         recorded.map((entry, i) => {
