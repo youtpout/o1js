@@ -599,9 +599,23 @@ async function recordCircuit(
       if (round < poseidonRounds - 1) stateRows.push(vars.map((x) => recorder.lc(x)));
       else outVars = vars;
     }
+    // kimchi packs ROUNDS_PER_ROW=5 rounds per Poseidon row and stores their
+    // states in the permuted column order STATE_ORDER=[0,2,3,4,1]. The Poseidon2
+    // constraint consumes `states` as a flat list chunked 5-per-row, so each
+    // chunk must be reordered [r0,r1,r2,r3,r4] -> [r0,r4,r1,r2,r3] to land in
+    // the right columns — exactly what the reference snarky `permute`
+    // (proof-systems snarky/src/poseidon.rs) emits. Without this the witness
+    // fails verification at the first round ("permutation of state[0] ->
+    // state[1][0] is incorrect").
+    const ROUNDS_PER_ROW = 5;
+    let orderedStates: (typeof stateRows)[number][] = [];
+    for (let i = 0; i < stateRows.length; i += ROUNDS_PER_ROW) {
+      let [r0, r1, r2, r3, r4] = stateRows.slice(i, i + ROUNDS_PER_ROW);
+      orderedStates.push(r0, r4, r1, r2, r3);
+    }
     recorder.constraints.push({
       kind: 'poseidon',
-      states: stateRows,
+      states: orderedStates,
       last: outVars.map((x) => recorder.lc(x)),
     });
     return outVars;
