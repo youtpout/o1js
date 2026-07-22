@@ -48,13 +48,20 @@ import {
   declareRecordedPreviousProofWidths,
   declareRecordedPreviousState,
   declareRecordedSideLoadedVks,
+  recordCircuit,
+  verifyRecordedBaseCase,
+  type RecordedCompiledCircuit,
 } from '../../proof-system/rust-pickles-recorded.js';
+import {
+  encodeRustPicklesProof,
+  type RustPicklesProofPayload,
+} from '../../proof-system/rust-pickles.js';
 import { ZkProgramContext } from '../../proof-system/zkprogram-context.js';
 import { extractProofs } from '../../proof-system/proof.js';
 import { activeInstance, setActiveInstance } from './mina-instance.js';
 import { newAccount } from './account.js';
 import { VerificationKey } from '../../proof-system/verification-key.js';
-import { DynamicProof, Proof, ProofClass } from '../../proof-system/proof.js';
+import { DynamicProof, Proof, ProofBase, ProofClass } from '../../proof-system/proof.js';
 import { PublicKey } from '../../provable/crypto/signature.js';
 import {
   InternalStateType,
@@ -180,6 +187,148 @@ method.returns = function <K extends string, T extends SmartContract, R extends 
     return method(target as any, methodName, descriptor, ProvableType.get(returnType));
   };
 };
+
+// Rust backend only. A zkApp method compiled through `methods[i]`, i.e. the
+// wrapper `(publicInput, publicKey, tokenId, ...args) => Promise<unknown>`.
+type RustZkappMethod = (
+  publicInput: ZkappPublicInput,
+  publicKey: PublicKey,
+  tokenId: Field,
+  ...args: unknown[]
+) => Promise<unknown>;
+
+// Rust backend only. Records ONE zkApp method circuit into the recorder
+// envelope. Shared by compile (no `values` → synthesized dummy witness, and
+// the closure flags the run as `inAnalyze`) and prove (`values` carries the
+// real account-update witness, and the run already sits under the enclosing
+// `zkAppProver.run` `inProver` context — so the closure must NOT re-enter
+// snarkContext there). The constraint shape is witness-independent, so the two
+// recordings agree byte-for-byte.
+function recordedZkappMethodCircuit(
+  methods: RustZkappMethod[],
+  methodIntfs: MethodInterface[],
+  index: number,
+  maxProofsVerified: number,
+  values?: { publicInput: ZkappPublicInput; args: unknown[]; proverData: unknown }
+): () => Promise<Field[]> {
+  return async () => {
+    let intf = methodIntfs[index];
+    let publicInput = Provable.witness(ZkappPublicInput, () =>
+      values !== undefined ? values.publicInput : ProvableType.synthesize(ZkappPublicInput)
+    );
+    let id = ZkProgramContext.enter();
+    // The @method wrapper only takes its in-circuit branch (fresh account
+    // update) under inCompile/inProver/inAnalyze. `recordCircuit` enters its
+    // own snarkContext (analyze for structure-only compile, plain
+    // checked-computation for witness generation) that clobbers whatever the
+    // caller set, so we must (re-)establish the flag here in BOTH modes:
+    //   - compile: analyze, so state reads hit the ephemeral dummy accounts;
+    //   - prove: inProver + the real proverData, so the wrapper reads the live
+    //     account state and hashes the same account update the caller built.
+    let snarkId =
+      values === undefined
+        ? snarkContext.enter({ inAnalyze: true, inCheckedComputation: true })
+        : snarkContext.enter({
+            inProver: true,
+            inCheckedComputation: true,
+            proverData: values.proverData,
+            witnesses: values.args,
+          });
+    try {
+      let finalArgs = intf.args.map((type, i) =>
+        Provable.witness(type, () =>
+          values !== undefined ? values.args[i] : ProvableType.synthesize(type)
+        )
+      );
+      let witnessedProofs: ProofBase<any, any>[] = [];
+      let previousStatementFields: Field[] = [];
+      finalArgs.forEach((value) =>
+        extractProofs(value).forEach((proof) => {
+          proof.declare();
+          witnessedProofs.push(proof);
+          // Bind the witnessed statement vars to the machinery's pre-witnessed
+          // previous-statement slots (OCaml hands the same cvars to the method
+          // and to the verifier).
+          let proofClass = proof.constructor as typeof Proof;
+          previousStatementFields.push(
+            ...(proofClass.publicInputType.toFields(proof.publicInput) as Field[]),
+            ...(proofClass.publicOutputType.toFields(proof.publicOutput) as Field[])
+          );
+        })
+      );
+      declareRecordedPreviousState(previousStatementFields);
+      await methods[index](publicInput, ...(finalArgs as [PublicKey, Field, ...unknown[]]));
+      // Declared from the recording itself so compile and prove agree.
+      declareRecordedPreviousProofWidths(
+        witnessedProofs.map((proof) => {
+          let P = proof.constructor as unknown as { maxProofsVerified?: number };
+          return typeof P.maxProofsVerified === 'number' ? P.maxProofsVerified : maxProofsVerified;
+        })
+      );
+      // OCaml witnesses the side-loaded keys AFTER the method body (zkprogram
+      // jsoo path) — the recorder marker mirrors it.
+      declareRecordedSideLoadedVks(
+        witnessedProofs.flatMap((proof, i) => {
+          if (!(proof instanceof DynamicProof)) return [];
+          let vk = proof.usedVerificationKey;
+          if (vk === undefined) {
+            throw Error('proof.verify() not called, call it at least once in your circuit');
+          }
+          return [{ proof: i, vkHash: vk.hash }];
+        })
+      );
+    } finally {
+      snarkContext.leave(snarkId);
+      ZkProgramContext.leave(id);
+    }
+    // statement = ZkappPublicInput (the output type is Empty)
+    return ZkappPublicInput.toFields(publicInput);
+  };
+}
+
+// Rust backend only. Builds the prover installed in `SmartContract._provers[i]`.
+// Invoked (via `getZkappProver`) inside `zkAppProver.run`, which sets the
+// `inProver` snarkContext with `{ transaction, accountUpdate, index }` proverData
+// and the method witnesses `[publicKey, tokenId, ...args]`. It re-records the
+// method with those real values, proves the recorded base case against the
+// retained compiled branch, and returns the rust proof payload as the tuple's
+// third element — the same slot `createZkappProof` reads for the jsoo Pickles
+// proof. `addProof` then serializes it with `encodeRustPicklesProof`.
+function makeRustZkappProver(
+  methods: RustZkappMethod[],
+  methodIntfs: MethodInterface[],
+  index: number,
+  maxProofsVerified: number,
+  compiled: RecordedCompiledCircuit
+): Pickles.Prover {
+  return async function rustZkappProver(_publicInput) {
+    // Captured before recordCircuit enters its own snarkContext (which would
+    // otherwise mask the enclosing zkAppProver.run prover data and witnesses).
+    let proverData = zkAppProver.getData();
+    let { transaction, accountUpdate } = proverData;
+    let publicInput = accountUpdate.toPublicInput(transaction);
+    let witnesses = (snarkContext.get().witnesses ?? []) as unknown[];
+    let recorded = await recordCircuit(
+      recordedZkappMethodCircuit(methods, methodIntfs, index, maxProofsVerified, {
+        publicInput,
+        args: witnesses,
+        proverData,
+      })
+    );
+    if (JSON.stringify(recorded.circuit) !== JSON.stringify(compiled.circuit)) {
+      throw Error(
+        `rust backend: zkApp circuit shape changed between compile and prove for ${methodIntfs[index].methodName}().`
+      );
+    }
+    let result = await compiled.proveBaseCaseWithWitness(recorded.witness);
+    let payload: RustPicklesProofPayload = {
+      appState: result.appState,
+      proof: result.proof as RustPicklesProofPayload['proof'],
+    };
+    // [tag, publicOutput, proof] — createZkappProof reads only index 2.
+    return [0, 0, payload] as unknown as ReturnType<Pickles.Prover>;
+  };
+}
 
 // do different things when calling a method, depending on the circumstance
 function wrapMethod(
@@ -548,6 +697,10 @@ class SmartContract extends SmartContractBase {
   >; // keyed by method name
   static _provers?: Pickles.Prover[];
   static _verificationKey?: { data: string; hash: Field };
+  // Rust backend only: the recorded, compiled per-method branches kept alive so
+  // the installed provers can prove transactions against them. Disposed and
+  // rebuilt on every recompile.
+  static _rustCompiledMethods?: RecordedCompiledCircuit[];
 
   /**
    * Returns a Proof type that belongs to this {@link SmartContract}.
@@ -610,10 +763,10 @@ class SmartContract extends SmartContractBase {
     let maxProofsVerified = computeMaxProofsVerified(proofs.map((p) => p.length));
 
     if (getProofSystemBackend() === 'rust') {
-      // Rust backend, compile-only milestone: record each method circuit
-      // (the account-update logic runs like any provable code) and extract
-      // the canonical side-loaded VK — the on-chain zkApp key. Proving
-      // transactions over this path is not wired yet.
+      // Rust backend: record each method circuit, extract the canonical
+      // side-loaded VK (the on-chain zkApp key), and KEEP the compiled
+      // branches alive so the installed provers can prove transactions
+      // against them.
       //
       // Unlike jsoo compile, the recorder EXECUTES witness computations, so
       // state reads hit `Mina.getAccount`. Install an ephemeral instance
@@ -626,81 +779,20 @@ class SmartContract extends SmartContractBase {
           return newAccount({ publicKey, tokenId });
         },
       });
-      let compiledBranches;
+      let compiledBranches: RecordedCompiledCircuit[];
       try {
-        compiledBranches = await compileRecordedProgramForZkapp();
+        compiledBranches = await compileRecordedProgram(
+          methodIntfs.map((intf, i) => ({
+            // No `values` → the closure synthesizes dummy witnesses. The
+            // constraint shape is witness-independent, so it is byte-identical
+            // to the prove-time re-recording below.
+            circuit: recordedZkappMethodCircuit(methods, methodIntfs, i, maxProofsVerified),
+            proofsVerified: proofs[i].length as 0 | 1 | 2,
+          })),
+          cache
+        );
       } finally {
         setActiveInstance(previousInstance);
-      }
-      async function compileRecordedProgramForZkapp() {
-        return compileRecordedProgram(
-        methodIntfs.map((intf, i) => ({
-          circuit: async () => {
-            let publicInput = Provable.witness(ZkappPublicInput, () =>
-              ProvableType.synthesize(ZkappPublicInput)
-            );
-            let id = ZkProgramContext.enter();
-            // The @method wrapper only takes its in-circuit branch (fresh
-            // account update, fetchMode 'test', dummy state) under
-            // inCompile/inProver/inAnalyze — flag the recording as analyze.
-            let snarkId = snarkContext.enter({ inAnalyze: true, inCheckedComputation: true });
-            try {
-              let finalArgs = intf.args.map((type) =>
-                Provable.witness(type, () => ProvableType.synthesize(type))
-              );
-              let witnessedProofs: import('../../proof-system/proof.js').ProofBase<any, any>[] = [];
-              let previousStatementFields: Field[] = [];
-              finalArgs.forEach((value) =>
-                extractProofs(value).forEach((proof) => {
-                  proof.declare();
-                  witnessedProofs.push(proof);
-                  // Bind the witnessed statement vars to the machinery's
-                  // pre-witnessed previous-statement slots (OCaml hands the
-                  // same cvars to the method and to the verifier).
-                  let proofClass = proof.constructor as typeof Proof;
-                  previousStatementFields.push(
-                    ...(proofClass.publicInputType.toFields(proof.publicInput) as Field[]),
-                    ...(proofClass.publicOutputType.toFields(proof.publicOutput) as Field[])
-                  );
-                })
-              );
-              declareRecordedPreviousState(previousStatementFields);
-              await methods[i](publicInput, ...(finalArgs as [PublicKey, Field, ...unknown[]]));
-              // Declared from the recording itself so compile and any
-              // re-recording agree byte-for-byte.
-              declareRecordedPreviousProofWidths(
-                witnessedProofs.map((proof) => {
-                  let P = proof.constructor as unknown as { maxProofsVerified?: number };
-                  return typeof P.maxProofsVerified === 'number'
-                    ? P.maxProofsVerified
-                    : maxProofsVerified;
-                })
-              );
-              // OCaml witnesses the side-loaded keys AFTER the method body
-              // (zkprogram.ts jsoo path) — the recorder marker mirrors it.
-              declareRecordedSideLoadedVks(
-                witnessedProofs.flatMap((proof, index) => {
-                  if (!(proof instanceof DynamicProof)) return [];
-                  let vk = proof.usedVerificationKey;
-                  if (vk === undefined) {
-                    throw Error(
-                      'proof.verify() not called, call it at least once in your circuit'
-                    );
-                  }
-                  return [{ proof: index, vkHash: vk.hash }];
-                })
-              );
-            } finally {
-              snarkContext.leave(snarkId);
-              ZkProgramContext.leave(id);
-            }
-            // statement = ZkappPublicInput (the output type is Empty)
-            return ZkappPublicInput.toFields(publicInput);
-          },
-          proofsVerified: proofs[i].length as 0 | 1 | 2,
-        })),
-        cache
-        );
       }
       let canonicalVk =
         compiledBranches.length > 0 &&
@@ -712,25 +804,35 @@ class SmartContract extends SmartContractBase {
         )
           ? compiledBranches[0].verificationKey
           : undefined;
-      for (let branch of compiledBranches) branch.dispose?.();
       if (canonicalVk === undefined) {
+        for (let branch of compiledBranches) branch.dispose?.();
         throw Error(
           'rust backend: SmartContract.compile did not produce a canonical verification key'
         );
       }
+      // Retain the branches for proving; drop any kept from a previous compile.
+      if (this._rustCompiledMethods !== undefined) {
+        for (let branch of this._rustCompiledMethods) branch.dispose?.();
+      }
+      this._rustCompiledMethods = compiledBranches;
       let verificationKey = new VerificationKey({
         data: canonicalVk.data,
         hash: Field(BigInt(canonicalVk.hash)),
       });
       this._verificationKey = verificationKey;
-      let verify = async () => {
-        throw Error('rust backend: zkApp proof verification is not wired yet');
-      };
-      let provers = methods.map(() => async () => {
-        throw Error('rust backend: zkApp transaction proving is not wired yet');
-      });
-      this._provers = provers as any;
-      return { verificationKey, provers: provers as any, verify: verify as any };
+      let provers = methodIntfs.map((intf, i): Pickles.Prover =>
+        makeRustZkappProver(methods, methodIntfs, i, maxProofsVerified, compiledBranches[i])
+      );
+      this._provers = provers;
+      // The compile-returned `verify` is unused for transaction validation
+      // (the block producer uses the top-level `verify(proof, vk)`), which
+      // already routes rust proofs through the recorded verifier.
+      let verify = (async () => {
+        throw Error(
+          'rust backend: verify a zkApp proof with the top-level `verify(proof, verificationKey)` from o1js'
+        );
+      }) as any;
+      return { verificationKey, provers: provers as any, verify };
     }
 
     let { verificationKey, provers, verify } = await compileProgram({

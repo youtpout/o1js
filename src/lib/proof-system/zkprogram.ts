@@ -173,13 +173,22 @@ async function verify(
     ) {
       return false;
     }
-    return verifyRecordedProofViaMinaRuntime(
-      rustProof.recursion === undefined
-        ? (rustProof as RecordedProofResult)
+    // Native preference verifies through the mina-runtime; otherwise fall back
+    // to the wasm recorded verifier (`verifyRecordedBaseCase` branches on the
+    // backend, N1/N2 are native-only).
+    return getProofSystemBackend() === 'rust' && getBackendPreference() === 'native'
+      ? verifyRecordedProofViaMinaRuntime(
+          rustProof.recursion === undefined
+            ? (rustProof as RecordedProofResult)
+            : rustProof.recursion.kind === 'n1'
+              ? ({ ...rustProof, ...rustProof.recursion } as RecordedN1ProofResult)
+              : ({ ...rustProof, ...rustProof.recursion } as RecordedN2ProofResult)
+        )
+      : rustProof.recursion === undefined
+        ? verifyRecordedBaseCase(rustProof as RecordedProofResult)
         : rustProof.recursion.kind === 'n1'
-          ? ({ ...rustProof, ...rustProof.recursion } as RecordedN1ProofResult)
-          : ({ ...rustProof, ...rustProof.recursion } as RecordedN2ProofResult)
-    );
+          ? verifyRecordedN1({ ...rustProof, ...rustProof.recursion })
+          : verifyRecordedN2({ ...rustProof, ...rustProof.recursion });
   }
   await initializeBindings();
   let picklesProof: Pickles.Proof;
