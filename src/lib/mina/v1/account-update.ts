@@ -21,10 +21,6 @@ import {
 import { dummyBase64Proof, Empty, Prover } from '../../proof-system/zkprogram.js';
 import { Proof } from '../../proof-system/proof.js';
 import { getProofSystemBackend } from '../../backend.js';
-import {
-  encodeRustPicklesProof,
-  type RustPicklesProofPayload,
-} from '../../proof-system/rust-pickles.js';
 import { Memo } from '../../../mina-signer/src/memo.js';
 import {
   Events as BaseEvents,
@@ -2000,10 +1996,10 @@ async function addProof(transaction: ZkappCommand, index: number, proofsEnabled:
   let accountUpdateProved = Authorization.setProof(
     accountUpdate,
     getProofSystemBackend() === 'rust'
-      ? // The rust prover returns its proof payload in `proof.proof`; the
-        // authorization carries it as the recorded-proof string that the
-        // block producer's `verify(proof, vk)` decodes.
-        encodeRustPicklesProof(proof.proof as unknown as RustPicklesProofPayload)
+      ? // The rust prover returns the Mina transaction-format proof string
+        // directly in `proof.proof`; it goes straight into the authorization,
+        // and the ledger / `verify(proof, vk)` parse it as a normal proof.
+        (proof.proof as unknown as string)
       : Pickles.proofToBase64Transaction(proof.proof)
   );
   return { accountUpdateProved, proof };

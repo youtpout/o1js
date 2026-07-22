@@ -52,10 +52,6 @@ import {
   verifyRecordedBaseCase,
   type RecordedCompiledCircuit,
 } from '../../proof-system/rust-pickles-recorded.js';
-import {
-  encodeRustPicklesProof,
-  type RustPicklesProofPayload,
-} from '../../proof-system/rust-pickles.js';
 import { ZkProgramContext } from '../../proof-system/zkprogram-context.js';
 import { extractProofs } from '../../proof-system/proof.js';
 import { activeInstance, setActiveInstance } from './mina-instance.js';
@@ -293,7 +289,8 @@ function recordedZkappMethodCircuit(
 // method with those real values, proves the recorded base case against the
 // retained compiled branch, and returns the rust proof payload as the tuple's
 // third element — the same slot `createZkappProof` reads for the jsoo Pickles
-// proof. `addProof` then serializes it with `encodeRustPicklesProof`.
+// proof — the Mina transaction-format authorization string, which `addProof`
+// writes straight into the account update.
 function makeRustZkappProver(
   methods: RustZkappMethod[],
   methodIntfs: MethodInterface[],
@@ -321,12 +318,16 @@ function makeRustZkappProver(
       );
     }
     let result = await compiled.proveBaseCaseWithWitness(recorded.witness);
-    let payload: RustPicklesProofPayload = {
-      appState: result.appState,
-      proof: result.proof as RustPicklesProofPayload['proof'],
-    };
-    // [tag, publicOutput, proof] — createZkappProof reads only index 2.
-    return [0, 0, payload] as unknown as ReturnType<Pickles.Prover>;
+    if (result.transactionProof === undefined) {
+      throw Error(
+        'rust backend: base proof did not produce a Mina transaction authorization proof'
+      );
+    }
+    // [tag, publicOutput, proof] — createZkappProof reads only index 2. The
+    // proof is the Mina transaction-format base64 string (same slot jsoo puts
+    // its Pickles proof), which addProof writes straight into the account
+    // update's authorization and the ledger/verifier parse as usual.
+    return [0, 0, result.transactionProof] as unknown as ReturnType<Pickles.Prover>;
   };
 }
 

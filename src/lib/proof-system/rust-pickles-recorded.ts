@@ -152,6 +152,10 @@ type RecordedCircuitJson = {
 type RecordedProofResult = {
   appState: string[];
   proof: unknown;
+  /** The Mina transaction authorization proof (base64 of the OCaml
+   * `Side_loaded.Proof.to_base64` sexp), when the wasm backend produced it —
+   * the string that goes in an account update's `authorization.proof`. */
+  transactionProof?: string;
 };
 
 type RecordedN1ProofResult = RecordedProofResult & {
@@ -1286,6 +1290,7 @@ type RustPicklesBindings = {
   rust_pickles_prove_recorded_base?: (circuit: string, witness: string[]) => string;
   rust_pickles_prove_recorded_base_keep?: (circuit: string, witness: string[]) => unknown;
   rust_pickles_recorded_base_envelope?: (handle: unknown) => string;
+  rust_pickles_recorded_base_transaction_base64?: (handle: unknown) => string;
   rust_pickles_prove_recorded_n1?: (circuit: string, witness: string[]) => string;
   rust_pickles_prove_recorded_stable_n1?: (
     circuit: string,
@@ -1406,6 +1411,21 @@ function fpWitnessToBytes(witness: string[]): Uint8Array {
   return bytes;
 }
 
+/** Parses the base-proof envelope and, when the wasm backend exposes it,
+ * attaches the Mina transaction-format authorization proof. */
+function withTransactionProof(
+  bindings: RustPicklesBindings,
+  proofHandle: unknown
+): RecordedProofResult {
+  let result = JSON.parse(
+    bindings.rust_pickles_recorded_base_envelope!(proofHandle)
+  ) as RecordedProofResult;
+  if (bindings.rust_pickles_recorded_base_transaction_base64) {
+    result.transactionProof = bindings.rust_pickles_recorded_base_transaction_base64(proofHandle);
+  }
+  return result;
+}
+
 async function proveRecordedBaseCaseCompiled(
   compiled: Pick<RecordedCompiledCircuit, 'circuit' | 'witness'> & {
     minaRuntime?: MinaRuntimeCompiled;
@@ -1441,7 +1461,7 @@ async function proveRecordedBaseCaseCompiled(
         )
       );
       try {
-        return JSON.parse(bindings.rust_pickles_recorded_base_envelope(proofHandle));
+        return withTransactionProof(bindings, proofHandle);
       } finally {
         (proofHandle as { free?: () => void }).free?.();
       }
@@ -1460,7 +1480,7 @@ async function proveRecordedBaseCaseCompiled(
           )
         : bindings.rust_pickles_prove_recorded_base_keep_compiled!(handle, compiled.witness)
     );
-    return JSON.parse(bindings.rust_pickles_recorded_base_envelope(proofHandle));
+    return withTransactionProof(bindings, proofHandle);
   }
   let native = await rustPicklesBindings();
   if (!native.rust_pickles_prove_recorded_base) {
