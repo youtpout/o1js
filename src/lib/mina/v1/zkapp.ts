@@ -1,70 +1,33 @@
 import 'reflect-metadata';
 import { Gate, Pickles } from '../../../bindings.js';
-import { Field, Bool } from '../../provable/wrapped.js';
-import {
-  AccountUpdate,
-  Authorization,
-  Body,
-  Events,
-  Permissions,
-  TokenId,
-  ZkappCommand,
-  zkAppProver,
-  ZkappPublicInput,
-  LazyProof,
-  AccountUpdateForest,
-  AccountUpdateLayout,
-  AccountUpdateTree,
-} from './account-update.js';
-import type { EventActionFilterOptions } from './graphql.js';
-import {
-  cloneCircuitValue,
-  FlexibleProvablePure,
-  InferProvable,
-} from '../../provable/types/struct.js';
-import { Provable, getBlindingValue, memoizationContext } from '../../provable/provable.js';
 import * as Encoding from '../../../bindings/lib/encoding.js';
-import {
-  HashInput,
-  Poseidon,
-  hashConstant,
-  isHashable,
-  packToFields,
-} from '../../provable/crypto/poseidon.js';
-import { UInt32, UInt64 } from '../../provable/int.js';
-import * as Mina from './mina.js';
-import { assertPreconditionInvariants, cleanPreconditionsCache } from './precondition.js';
-import {
-  analyzeMethod,
-  compileProgram,
-  computeMaxProofsVerified,
-  Empty,
-  MethodInterface,
-  sortMethodArguments,
-} from '../../proof-system/zkprogram.js';
 import { getProofSystemBackend } from '../../backend.js';
+import { Cache } from '../../proof-system/cache.js';
+import {
+  DynamicProof,
+  Proof,
+  ProofBase,
+  ProofClass,
+  extractProofs,
+} from '../../proof-system/proof.js';
 import {
   compileRecordedProgram,
   declareRecordedPreviousProofWidths,
   declareRecordedPreviousState,
   declareRecordedSideLoadedVks,
   recordCircuit,
-  verifyRecordedBaseCase,
   type RecordedCompiledCircuit,
 } from '../../proof-system/rust-pickles-recorded.js';
-import { ZkProgramContext } from '../../proof-system/zkprogram-context.js';
-import { extractProofs } from '../../proof-system/proof.js';
-import { activeInstance, setActiveInstance } from './mina-instance.js';
-import { newAccount } from './account.js';
 import { VerificationKey } from '../../proof-system/verification-key.js';
-import { DynamicProof, Proof, ProofBase, ProofClass } from '../../proof-system/proof.js';
-import { PublicKey } from '../../provable/crypto/signature.js';
+import { ZkProgramContext } from '../../proof-system/zkprogram-context.js';
 import {
-  InternalStateType,
-  assertStatePrecondition,
-  cleanStatePrecondition,
-  getLayout,
-} from './state.js';
+  Empty,
+  MethodInterface,
+  analyzeMethod,
+  compileProgram,
+  computeMaxProofsVerified,
+  sortMethodArguments,
+} from '../../proof-system/zkprogram.js';
 import {
   inAnalyze,
   inCheckedComputation,
@@ -72,22 +35,62 @@ import {
   inProver,
   snarkContext,
 } from '../../provable/core/provable-context.js';
-import { Cache } from '../../proof-system/cache.js';
+import {
+  HashInput,
+  Poseidon,
+  hashConstant,
+  isHashable,
+  packToFields,
+} from '../../provable/crypto/poseidon.js';
+import { PublicKey } from '../../provable/crypto/signature.js';
 import { assert } from '../../provable/gadgets/common.js';
+import { UInt32, UInt64 } from '../../provable/int.js';
+import { Provable, getBlindingValue, memoizationContext } from '../../provable/provable.js';
+import { provable } from '../../provable/types/provable-derivers.js';
+import { ProvablePure, ProvableType } from '../../provable/types/provable-intf.js';
+import {
+  FlexibleProvablePure,
+  InferProvable,
+  cloneCircuitValue,
+} from '../../provable/types/struct.js';
+import { Bool, Field } from '../../provable/wrapped.js';
+import { assertPromise } from '../../util/assert.js';
+import {
+  AccountUpdate,
+  AccountUpdateForest,
+  AccountUpdateLayout,
+  AccountUpdateTree,
+  Authorization,
+  Body,
+  Events,
+  LazyProof,
+  Permissions,
+  TokenId,
+  ZkappCommand,
+  ZkappPublicInput,
+  zkAppProver,
+} from './account-update.js';
+import { newAccount } from './account.js';
+import { Reducer, getReducer } from './actions/reducer.js';
+import type { EventActionFilterOptions } from './graphql.js';
+import { ZkappStateLength, activeInstance, setActiveInstance } from './mina-instance.js';
+import * as Mina from './mina.js';
+import { assertPreconditionInvariants, cleanPreconditionsCache } from './precondition.js';
 import { SmartContractBase } from './smart-contract-base.js';
-import { ZkappStateLength } from './mina-instance.js';
 import {
   SmartContractContext,
   accountUpdateLayout,
   smartContractContext,
 } from './smart-contract-context.js';
-import { assertPromise } from '../../util/assert.js';
-import { ProvablePure, ProvableType } from '../../provable/types/provable-intf.js';
-import { getReducer, Reducer } from './actions/reducer.js';
-import { provable } from '../../provable/types/provable-derivers.js';
+import {
+  InternalStateType,
+  assertStatePrecondition,
+  cleanStatePrecondition,
+  getLayout,
+} from './state.js';
 
 // external API
-export { SmartContract, method, DeployArgs, declareMethods };
+export { DeployArgs, SmartContract, declareMethods, method };
 
 const reservedPropNames = new Set(['_methods', '_']);
 type AsyncFunction = (...args: any) => Promise<any>;
@@ -196,10 +199,10 @@ type RustZkappMethod = (
 // Rust backend only. Records ONE zkApp method circuit into the recorder
 // envelope. Shared by compile (no `values` → synthesized dummy witness, and
 // the closure flags the run as `inAnalyze`) and prove (`values` carries the
-// real account-update witness, and the run already sits under the enclosing
-// `zkAppProver.run` `inProver` context — so the closure must NOT re-enter
-// snarkContext there). The constraint shape is witness-independent, so the two
-// recordings agree byte-for-byte.
+// real account-update witness). Compile uses `inAnalyze`; prove uses the
+// canonical `inProver` mode so state and transaction reads use live values.
+// The recorder itself ignores constraint-like work performed inside witness
+// callbacks, matching Snarky's circuit boundary and keeping both shapes equal.
 function recordedZkappMethodCircuit(
   methods: RustZkappMethod[],
   methodIntfs: MethodInterface[],
@@ -215,21 +218,18 @@ function recordedZkappMethodCircuit(
     let id = ZkProgramContext.enter();
     // The @method wrapper only takes its in-circuit branch (fresh account
     // update) under inCompile/inProver/inAnalyze. `recordCircuit` enters its
-    // own snarkContext (analyze for structure-only compile, plain
-    // checked-computation for witness generation) that clobbers whatever the
-    // caller set, so we must (re-)establish the flag here in BOTH modes:
-    //   - compile: analyze, so state reads hit the ephemeral dummy accounts;
-    //   - prove: inProver + the real proverData, so the wrapper reads the live
-    //     account state and hashes the same account update the caller built.
-    let snarkId =
+    // own snarkContext and clobbers the caller's flags. Re-establish the
+    // appropriate compile/prove mode here.
+    let snarkId = snarkContext.enter(
       values === undefined
-        ? snarkContext.enter({ inAnalyze: true, inCheckedComputation: true })
-        : snarkContext.enter({
+        ? { inAnalyze: true, inCheckedComputation: true }
+        : {
             inProver: true,
             inCheckedComputation: true,
             proverData: values.proverData,
             witnesses: values.args,
-          });
+          }
+    );
     try {
       let finalArgs = intf.args.map((type, i) =>
         Provable.witness(type, () =>
@@ -310,11 +310,30 @@ function makeRustZkappProver(
         publicInput,
         args: witnesses,
         proverData,
-      })
+      }),
+      // The Rust prover validates the recorded constraints. Calling Snarky's
+      // low-level assertion validators here re-emits their internal Generic
+      // gates while the recorder hooks are active, duplicating constraints
+      // that do not exist in the canonical compile circuit.
+      { validateWitness: false, generateWitness: true }
     );
     if (JSON.stringify(recorded.circuit) !== JSON.stringify(compiled.circuit)) {
+      let compileConstraints = compiled.circuit.constraints;
+      let proveConstraints = recorded.circuit.constraints;
+      let firstDifference = Math.min(compileConstraints.length, proveConstraints.length);
+      for (let i = 0; i < firstDifference; i++) {
+        if (JSON.stringify(compileConstraints[i]) !== JSON.stringify(proveConstraints[i])) {
+          firstDifference = i;
+          break;
+        }
+      }
       throw Error(
-        `rust backend: zkApp circuit shape changed between compile and prove for ${methodIntfs[index].methodName}().`
+        `rust backend: zkApp circuit shape changed between compile and prove for ${methodIntfs[index].methodName}() ` +
+          `(constraints ${compileConstraints.length}/${proveConstraints.length}, ` +
+          `aux ${compiled.circuit.aux_count}/${recorded.circuit.aux_count}, ` +
+          `first difference ${firstDifference}: ` +
+          `${compileConstraints.slice(firstDifference, firstDifference + 15).map((c) => c.kind)} / ` +
+          `${proveConstraints.slice(firstDifference, firstDifference + 15).map((c) => c.kind)}).`
       );
     }
     let result = await compiled.proveBaseCaseWithWitness(recorded.witness);
@@ -356,12 +375,16 @@ function wrapMethod(
         if (inCompile() || inProver() || inAnalyze()) {
           // important to run this with a fresh accountUpdate every time, otherwise compile messes up our circuits
           // because it runs this multiple times
-          let proverData = inProver() ? zkAppProver.getData() : undefined;
+          // Rust prove-time re-recording establishes `inProver` inside the
+          // recorded circuit closure. Presence of proverData, rather than the
+          // outer context flag, distinguishes this live transaction pass.
+          let proverData = zkAppProver.getData();
+          let isProver = proverData !== undefined;
           let txId = Mina.currentTransaction.enter({
             sender: proverData?.transaction.feePayer.body.publicKey,
             // TODO could pass an update with the fee payer's content here? probably not bc it's not accessed
             layout: new AccountUpdateLayout(),
-            fetchMode: inProver() ? 'cached' : 'test',
+            fetchMode: isProver ? 'cached' : 'test',
             isFinalRunOutsideCircuit: false,
             numberOfRuns: undefined,
           });
@@ -776,6 +799,9 @@ class SmartContract extends SmartContractBase {
       let previousInstance = activeInstance;
       setActiveInstance({
         ...previousInstance,
+        hasAccount() {
+          return false;
+        },
         getAccount(publicKey, tokenId) {
           return newAccount({ publicKey, tokenId });
         },
@@ -821,8 +847,9 @@ class SmartContract extends SmartContractBase {
         hash: Field(BigInt(canonicalVk.hash)),
       });
       this._verificationKey = verificationKey;
-      let provers = methodIntfs.map((intf, i): Pickles.Prover =>
-        makeRustZkappProver(methods, methodIntfs, i, maxProofsVerified, compiledBranches[i])
+      let provers = methodIntfs.map(
+        (intf, i): Pickles.Prover =>
+          makeRustZkappProver(methods, methodIntfs, i, maxProofsVerified, compiledBranches[i])
       );
       this._provers = provers;
       // The compile-returned `verify` is unused for transaction validation
@@ -1368,7 +1395,12 @@ super.init();
   }
 
   static runOutsideCircuit(run: () => void) {
-    if (Mina.currentTransaction()?.isFinalRunOutsideCircuit || inProver()) Provable.asProver(run);
+    if (
+      Mina.currentTransaction()?.isFinalRunOutsideCircuit ||
+      inProver() ||
+      zkAppProver.getData() !== undefined
+    )
+      Provable.asProver(run);
   }
 
   // TODO: this could also be used to quickly perform any invariant checks on account updates construction
@@ -1514,14 +1546,17 @@ const ProofAuthorization = {
       });
       priorAccountUpdatesFlat ??= proverData.transaction.accountUpdates;
       priorAccountUpdatesFlat = priorAccountUpdatesFlat.filter((a) => a.id !== myAccountUpdateId);
-      let accountUpdate = [...priorAccountUpdatesFlat]
-        .reverse()
-        .find((body_) =>
-          body_.update.verificationKey.isSome
-            .and(body_.tokenId.equals(body.tokenId))
-            .and(body_.publicKey.equals(body.publicKey))
-            .toBoolean()
-        );
+      let accountUpdate = [...priorAccountUpdatesFlat].reverse().find(
+        (body_) =>
+          // This runs inside a witness callback. Using checked `Bool.and()` /
+          // `Field.equals()` here leaked constraints into the prove-time
+          // recording, while compile has no transaction to search. Compare
+          // the already-known witness values as plain JavaScript values.
+          body_.update.verificationKey.isSome.toBoolean() &&
+          body_.tokenId.toBigInt() === body.tokenId.toBigInt() &&
+          body_.publicKey.x.toBigInt() === body.publicKey.x.toBigInt() &&
+          body_.publicKey.isOdd.toBoolean() === body.publicKey.isOdd.toBoolean()
+      );
       if (accountUpdate !== undefined) {
         return accountUpdate.body.update.verificationKey.value.hash;
       }

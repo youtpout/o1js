@@ -516,4 +516,47 @@ branch must be owned before `ZkProgram.compile()` returns.
 `~/Projects/mina-rust/crates/mina-runtime/src/backend.rs`,
 `~/Projects/proof-systems/pickles/src/recorded.rs`
 
+date: 2026-07-22 agent: codex session: lumina-smartcontract-rust category:
+correctness severity: high tags: [pickles, smartcontract, lookup, wasm,
+vk-parity]
+
+---
+
+### SmartContract witness callbacks and multi-method N0 programs need canonical Rust shapes
+
+**Context:** Lumina's `Factory.test` compiled with Rust but failed while proving
+and sending real zkApp account updates. Large token/pool contracts also retain
+several N0 methods and mix lookup with non-lookup Step circuits.
+
+**What happened:** Recorder hooks captured checked operations executed inside
+`Provable.witness` callbacks, so prove-time transaction/state reads added
+constraints that structure-only compile never saw. Multi-method N0 contracts
+were compiled as independent base cases instead of one Pickles program Wrap.
+Mixed lookup programs then needed the lookup `Opt.Maybe` payload even while
+proving their no-lookup branch. Finally, the Mina transaction statement
+serialized feature flags and the joint combiner as always absent, causing the
+ledger's jsoo verifier to reject an otherwise valid Rust proof.
+
+**Resolution/Workaround:** Ignore recorder hooks while `inWitnessBlock`,
+re-enter the canonical `inProver` context with live prover data, and compare
+proof-authorization witness values outside the checked DSL. Compile every
+multi-branch N0 program with one shared Wrap; retain dummy masked lookup
+payloads on absent branches; serialize real lookup flags/joint-combiner in Sexp
+and bin_prot; and embed the canonical maximum Step domain VK in every branch
+proof. Drop temporary per-branch Wrap indexes during shared compile to keep Rust
+WASM below its memory ceiling.
+
+`Factory.test` passes 8/8 in Rust native and 8/8 in Rust WASM, including every
+`tx.prove()` and local-ledger `send()`. VK `{data,hash}` output for all six
+Lumina contracts is byte-identical between Rust and jsoo.
+
+**Key takeaway:** A witness callback is a value-generation boundary, not part of
+the recorded circuit. For a Pickles program, proof metadata and optional lookup
+payload shape belong to the canonical program Wrap, even when the selected
+method is a smaller or no-lookup branch.
+
+**Relevant files:** `src/lib/mina/v1/zkapp.ts`,
+`src/lib/proof-system/rust-pickles-recorded.ts`,
+`~/Projects/proof-systems/pickles/src/{api.rs,recorded.rs,mina_sexp.rs,mina_bin_prot.rs}`
+
 <!-- END LOG -->

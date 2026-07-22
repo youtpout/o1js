@@ -15,6 +15,8 @@
  * until their recorder is wired up.
  */
 import { Snarky, initializeBindings, wasm, withThreadPool } from '../../bindings.js';
+import { poseidonParamsKimchiFp } from '../../bindings/crypto/constants.js';
+import { Fp } from '../../bindings/crypto/finite-field.js';
 import { flattenFieldVar } from '../../native/snarky.js';
 import { getBackendPreference, getProofSystemBackend } from '../backend.js';
 import {
@@ -23,22 +25,20 @@ import {
   type RecursiveProofResponse,
   type RustProofResponse,
 } from '../mina-runtime/backend.js';
-import { FieldConst, FieldType, FieldVar } from '../provable/core/fieldvar.js';
 import { existsOne } from '../provable/core/exists.js';
-import { setAllowEmptyUnconstrained } from '../provable/types/unconstrained.js';
-import { Fp } from '../../bindings/crypto/finite-field.js';
-import { poseidonParamsKimchiFp } from '../../bindings/crypto/constants.js';
+import { FieldConst, FieldType, FieldVar } from '../provable/core/fieldvar.js';
 import { snarkContext } from '../provable/core/provable-context.js';
 import type { Field } from '../provable/field.js';
+import { setAllowEmptyUnconstrained } from '../provable/types/unconstrained.js';
 import { Cache, readCache, withVersion, writeCache, type CacheHeader } from './cache.js';
 
 export {
   compileRecorded,
-  declareRecordedPreviousState,
-  declareRecordedPreviousProofWidths,
-  declareRecordedSideLoadedVks,
   compileRecordedN1Over,
   compileRecordedProgram,
+  declareRecordedPreviousProofWidths,
+  declareRecordedPreviousState,
+  declareRecordedSideLoadedVks,
   proveRecordedBaseCase,
   proveRecordedBaseCaseKeep,
   proveRecordedN,
@@ -261,7 +261,17 @@ type MinaRuntimeBaseHandle = {
 let minaRuntimeClientPromise: Promise<MinaRuntimeClient> | undefined;
 
 function useMinaRuntimeBackend() {
-  return getProofSystemBackend() === 'rust' && getBackendPreference() === 'native';
+  // The high-level mina-runtime transport is the native default. Keep a
+  // development escape hatch for exercising the direct kimchi-napi Pickles
+  // bindings: unlike mina-runtime, that path is also the implementation used
+  // by the browser WASM transport, so it is useful for native-first debugging
+  // of recorder / compile / prove parity without changing browser semantics.
+  let forceDirect = typeof process !== 'undefined' && process.env.O1JS_RUST_NATIVE_DIRECT === '1';
+  return getProofSystemBackend() === 'rust' && getBackendPreference() === 'native' && !forceDirect;
+}
+
+function useDirectNativeBindings() {
+  return typeof process !== 'undefined' && process.env.O1JS_RUST_NATIVE_DIRECT === '1';
 }
 
 async function minaRuntimeClient() {
@@ -408,7 +418,7 @@ function declareRecordedPreviousState(fields: Field[]) {
  */
 async function recordCircuit(
   f: () => Field[] | Promise<Field[]>,
-  { validateWitness = true } = {}
+  { validateWitness = true, generateWitness = validateWitness } = {}
 ): Promise<{ circuit: RecordedCircuitJson; witness: string[] }> {
   await initializeBindings();
   // Loaded lazily (proof-system -> provable would be a static import cycle);
@@ -446,27 +456,63 @@ async function recordCircuit(
     foreignFieldMul: gates.foreignFieldMul,
   };
   let originalGates = new Map<string, unknown>();
+  let suppressRecording = false;
+  let insideWitnessCallback = () => snarkContext.get().inWitnessBlock === true;
 
   field.assertEqual = (x, y) => {
+    if (suppressRecording || insideWitnessCallback()) return original.assertEqual.call(field, x, y);
     recorder.constraints.push({ kind: 'equal', l: recorder.lc(x), r: recorder.lc(y) });
-    if (validateWitness) return original.assertEqual.call(field, x, y);
+    if (validateWitness) {
+      suppressRecording = true;
+      try {
+        return original.assertEqual.call(field, x, y);
+      } finally {
+        suppressRecording = false;
+      }
+    }
   };
   field.assertMul = (x, y, z) => {
+    if (suppressRecording || insideWitnessCallback())
+      return original.assertMul.call(field, x, y, z);
     recorder.constraints.push({
       kind: 'r1cs',
       a: recorder.lc(x),
       b: recorder.lc(y),
       c: recorder.lc(z),
     });
-    if (validateWitness) return original.assertMul.call(field, x, y, z);
+    if (validateWitness) {
+      suppressRecording = true;
+      try {
+        return original.assertMul.call(field, x, y, z);
+      } finally {
+        suppressRecording = false;
+      }
+    }
   };
   field.assertSquare = (x, y) => {
+    if (suppressRecording || insideWitnessCallback())
+      return original.assertSquare.call(field, x, y);
     recorder.constraints.push({ kind: 'square', v: recorder.lc(x), square: recorder.lc(y) });
-    if (validateWitness) return original.assertSquare.call(field, x, y);
+    if (validateWitness) {
+      suppressRecording = true;
+      try {
+        return original.assertSquare.call(field, x, y);
+      } finally {
+        suppressRecording = false;
+      }
+    }
   };
   field.assertBoolean = (x) => {
+    if (suppressRecording || insideWitnessCallback()) return original.assertBoolean.call(field, x);
     recorder.constraints.push({ kind: 'boolean', v: recorder.lc(x) });
-    if (validateWitness) return original.assertBoolean.call(field, x);
+    if (validateWitness) {
+      suppressRecording = true;
+      try {
+        return original.assertBoolean.call(field, x);
+      } finally {
+        suppressRecording = false;
+      }
+    }
   };
   // `Snarky.field.truncateToBits16` (OCaml `Scalar_challenge.to_field_checked'`,
   // used by every UInt range check) emits `EndoMulScalar` rows entirely in
@@ -479,6 +525,7 @@ async function recordCircuit(
       truncateToBits16: (lengthDiv16: number, x: FieldVar) => FieldVar;
     }
   ).truncateToBits16 = (lengthDiv16, x) => {
+    if (insideWitnessCallback()) return originalTruncateToBits16.call(field, lengthDiv16, x);
     let result = originalTruncateToBits16.call(field, lengthDiv16, x);
     recorder.constraints.push({
       kind: 'endoscalar',
@@ -489,6 +536,8 @@ async function recordCircuit(
     return result;
   };
   gates.generic = (cl, l, cr, r, co, o, m, c) => {
+    if (suppressRecording || insideWitnessCallback())
+      return original.generic.call(gates, cl, l, cr, r, co, o, m, c);
     recorder.constraints.push({
       kind: 'generic',
       cl: FieldConst.toBigint(cl).toString(),
@@ -503,6 +552,7 @@ async function recordCircuit(
     return original.generic.call(gates, cl, l, cr, r, co, o, m, c);
   };
   gates.poseidon = (state) => {
+    if (insideWitnessCallback()) return original.poseidon.call(gates, state);
     let states = mlArrayToArray<unknown>(state as { length: number; [index: number]: unknown }).map(
       (row) => fieldVarsFromMlTuple('poseidon.state', row, 3).map((cell) => recorder.lc(cell))
     );
@@ -625,6 +675,7 @@ async function recordCircuit(
     return outVars;
   };
   poseidonApi.update = (mlState: unknown, mlInput: unknown) => {
+    if (insideWitnessCallback()) return originalPoseidon.update.call(poseidonApi, mlState, mlInput);
     let state = fieldVarsFromMlArray('poseidon.update.state', mlState, 3);
     let input = fieldVarsFromMlArray('poseidon.update.input', mlInput);
     if (input.length === 0) {
@@ -653,13 +704,16 @@ async function recordCircuit(
   // primitives, so the app-circuit constraints are recorded. Group-map algorithm
   // = checked_map.ml `wrap` + the Pallas conic map (elliptic-curve.ts).
   poseidonApi.hashToGroup = (mlInput: unknown) => {
+    if (insideWitnessCallback()) return originalPoseidon.hashToGroup.call(poseidonApi, mlInput);
     let inputVars = fieldVarsFromMlArray('hashToGroup.input', mlInput);
     // hash = Poseidon.hash(input) = update([0,0,0], input).state[0]
     let zero = () => FieldVar.constant(0n);
-    let updated = poseidonApi.update(
-      [0, zero(), zero(), zero()],
-      [0, ...inputVars]
-    ) as [number, FieldVar, FieldVar, FieldVar];
+    let updated = poseidonApi.update([0, zero(), zero(), zero()], [0, ...inputVars]) as [
+      number,
+      FieldVar,
+      FieldVar,
+      FieldVar,
+    ];
     let t = new Field(updated[1]);
 
     // --- group map (checked_map.ml) ---
@@ -692,7 +746,9 @@ async function recordCircuit(
 
     // y_squared(x) = x^3 + b, then sqrt_flagged
     let ySquared = (x: InstanceType<typeof Field>) => x.mul(x).mul(x).add(bParam);
-    let sqrtFlagged = (ysq: InstanceType<typeof Field>): [InstanceType<typeof Field>, InstanceType<typeof Bool>] => {
+    let sqrtFlagged = (
+      ysq: InstanceType<typeof Field>
+    ): [InstanceType<typeof Field>, InstanceType<typeof Bool>] => {
       // OCaml `sqrt_exn (Field.if_ is_square ~then_:ysq ~else_:(scale ysq m))`:
       // a SINGLE R1CS `assert_r1cs is_square (ysq - m*ysq) (z - m*ysq)`. Routing
       // through Snarky.field.assertMul (recorded as `r1cs`) makes the rust
@@ -720,7 +776,7 @@ async function recordCircuit(
     let numTrue = FieldVar.add(FieldVar.add(b1.value, b2.value), b3.value);
     let invTrue = existsOne(() => {
       let n = readVarBigint(numTrue);
-      return n === 0n ? 0n : Fp.inverse(n) ?? 0n;
+      return n === 0n ? 0n : (Fp.inverse(n) ?? 0n);
     }).value;
     Snarky.field.assertMul(numTrue, invTrue, FieldVar.constant(1n));
     // x1_is_first = b1, x2_is_first = (not b1) && b2, x3_is_first = (not b1) &&
@@ -737,13 +793,25 @@ async function recordCircuit(
     let gx = x3f.mul(x3).add(x2f.mul(x2)).add(x1f.mul(x1));
     return [0, gx.value, gy.value];
   };
-  poseidonApi.sponge.create = () => {
+  poseidonApi.sponge.create = (isChecked: unknown) => {
+    if (insideWitnessCallback())
+      return originalPoseidon.spongeCreate.call(poseidonApi.sponge, isChecked);
     throw Error('Rust Pickles recorder: Poseidon.Sponge is not supported yet');
   };
-  poseidonApi.sponge.absorb = () => {
+  poseidonApi.sponge.absorb = (...args: unknown[]) => {
+    if (insideWitnessCallback())
+      return (originalPoseidon.spongeAbsorb as (...args: unknown[]) => unknown).call(
+        poseidonApi.sponge,
+        ...args
+      );
     throw Error('Rust Pickles recorder: Poseidon.Sponge is not supported yet');
   };
-  poseidonApi.sponge.squeeze = () => {
+  poseidonApi.sponge.squeeze = (...args: unknown[]) => {
+    if (insideWitnessCallback())
+      return (originalPoseidon.spongeSqueeze as (...args: unknown[]) => unknown).call(
+        poseidonApi.sponge,
+        ...args
+      );
     throw Error('Rust Pickles recorder: Poseidon.Sponge is not supported yet');
   };
 
@@ -803,6 +871,8 @@ async function recordCircuit(
     return { x: x3, y: y3 };
   };
   groupApi.scaleFastUnpack = (Pml, shiftedMl, numBits) => {
+    if (insideWitnessCallback())
+      return originalScaleFastUnpack.call(groupApi, Pml, shiftedMl, numBits);
     let [baseXraw, baseYraw] = fieldVarsFromMlArray('scaleFastUnpack.P', Pml, 2);
     let [scalar] = fieldVarsFromMlArray('scaleFastUnpack.shifted', shiftedMl, 1);
     // witness the MSB-first bits of the scalar
@@ -894,6 +964,8 @@ async function recordCircuit(
   };
 
   gates.ecAdd = (p1, p2, p3, inf, same_x, slope, inf_z, x21_inv) => {
+    if (insideWitnessCallback())
+      return original.ecAdd.call(gates, p1, p2, p3, inf, same_x, slope, inf_z, x21_inv);
     let [p1x, p1y] = fieldVarsFromMlTuple('ecAdd.p1', p1, 2);
     let [p2x, p2y] = fieldVarsFromMlTuple('ecAdd.p2', p2, 2);
     let [p3x, p3y] = fieldVarsFromMlTuple('ecAdd.p3', p3, 2);
@@ -911,6 +983,7 @@ async function recordCircuit(
     return original.ecAdd.call(gates, p1, p2, p3, inf, same_x, slope, inf_z, x21_inv);
   };
   gates.rangeCheck0 = (v0, v0p, v0c, compact) => {
+    if (insideWitnessCallback()) return original.rangeCheck0.call(gates, v0, v0p, v0c, compact);
     let row = [
       v0,
       ...fieldVarsFromMlTuple('rangeCheck0.v0p', v0p, 6),
@@ -924,6 +997,7 @@ async function recordCircuit(
     return original.rangeCheck0.call(gates, v0, v0p, v0c, compact);
   };
   gates.rangeCheck1 = (v2, v12, vCurr, vNext) => {
+    if (insideWitnessCallback()) return original.rangeCheck1.call(gates, v2, v12, vCurr, vNext);
     let row = [v2, v12, ...fieldVarsFromMlTuple('rangeCheck1.vCurr', vCurr, 13)];
     let next = fieldVarsFromMlTuple('rangeCheck1.vNext', vNext, 15);
     recorder.constraints.push({
@@ -934,6 +1008,7 @@ async function recordCircuit(
     return original.rangeCheck1.call(gates, v2, v12, vCurr, vNext);
   };
   gates.lookup = (input) => {
+    if (insideWitnessCallback()) return original.lookup.call(gates, input);
     let row = fieldVarsFromMlTuple('lookup', input, 7);
     recorder.constraints.push({ kind: 'lookup', row: row.map((cell) => recorder.lc(cell)) });
     return original.lookup.call(gates, input);
@@ -956,24 +1031,67 @@ async function recordCircuit(
     out2,
     out3
   ) => {
+    if (insideWitnessCallback())
+      return original.xor.call(
+        gates,
+        in1,
+        in2,
+        out,
+        in1_0,
+        in1_1,
+        in1_2,
+        in1_3,
+        in2_0,
+        in2_1,
+        in2_2,
+        in2_3,
+        out0,
+        out1,
+        out2,
+        out3
+      );
     let row = [
-      in1, in2, out,
-      in1_0, in1_1, in1_2, in1_3,
-      in2_0, in2_1, in2_2, in2_3,
-      out0, out1, out2, out3,
+      in1,
+      in2,
+      out,
+      in1_0,
+      in1_1,
+      in1_2,
+      in1_3,
+      in2_0,
+      in2_1,
+      in2_2,
+      in2_3,
+      out0,
+      out1,
+      out2,
+      out3,
     ];
     recorder.constraints.push({ kind: 'xor16', row: row.map((cell) => recorder.lc(cell)) });
     return original.xor.call(
       gates,
-      in1, in2, out,
-      in1_0, in1_1, in1_2, in1_3,
-      in2_0, in2_1, in2_2, in2_3,
-      out0, out1, out2, out3
+      in1,
+      in2,
+      out,
+      in1_0,
+      in1_1,
+      in1_2,
+      in1_3,
+      in2_0,
+      in2_1,
+      in2_2,
+      in2_3,
+      out0,
+      out1,
+      out2,
+      out3
     );
   };
   // Rot64 gate row: [word, rotated, excess, bound_limb0..3, bound_crumb0..7]
   // (15 vars) + the 2^rot coefficient. `limbs`/`crumbs` arrive as MlArrays.
   gates.rotate = (field_, rotated, excess, limbs, crumbs, two_to_rot) => {
+    if (insideWitnessCallback())
+      return original.rotate.call(gates, field_, rotated, excess, limbs, crumbs, two_to_rot);
     let limbsArr = fieldVarsFromMlArray('rotate.limbs', limbs, 4);
     let crumbsArr = fieldVarsFromMlArray('rotate.crumbs', crumbs, 8);
     let row = [field_, rotated, excess, ...limbsArr, ...crumbsArr];
@@ -988,6 +1106,7 @@ async function recordCircuit(
   // to 15) values and coefficients. Used e.g. for the trailing `Zero` row of an
   // XOR chain.
   gates.raw = (kind, values, coefficients) => {
+    if (insideWitnessCallback()) return original.raw.call(gates, kind, values, coefficients);
     let row = fieldVarsFromMlArray('raw.values', values);
     let coeffs = mlArrayToArray<FieldConst>(
       coefficients as { length: number; [index: number]: FieldConst }
@@ -1003,6 +1122,8 @@ async function recordCircuit(
   // ForeignFieldAdd row: [left0..2, right0..2, field_overflow, carry], coeffs
   // [modulus0..2, sign].
   gates.foreignFieldAdd = (left, right, overflow, carry, modulus, sign) => {
+    if (insideWitnessCallback())
+      return original.foreignFieldAdd.call(gates, left, right, overflow, carry, modulus, sign);
     let l = fieldVarsFromMlTuple('ffadd.left', left, 3);
     let r = fieldVarsFromMlTuple('ffadd.right', right, 3);
     let row = [...l, ...r, overflow, carry] as FieldVar[];
@@ -1034,6 +1155,21 @@ async function recordCircuit(
     mod2,
     negMod
   ) => {
+    if (insideWitnessCallback())
+      return original.foreignFieldMul.call(
+        gates,
+        left,
+        right,
+        remainder,
+        quotient,
+        quotientHiBound,
+        product1,
+        carry0,
+        carry1p,
+        carry1c,
+        mod2,
+        negMod
+      );
     let l = fieldVarsFromMlTuple('ffmul.left', left, 3);
     let r = fieldVarsFromMlTuple('ffmul.right', right, 3);
     let rem = fieldVarsFromMlTuple('ffmul.remainder', remainder, 2);
@@ -1042,12 +1178,35 @@ async function recordCircuit(
     let c1p = fieldVarsFromMlTuple('ffmul.carry1p', carry1p, 7);
     let c1c = fieldVarsFromMlTuple('ffmul.carry1c', carry1c, 4);
     let curr = [
-      l[0], l[1], l[2], r[0], r[1], r[2], p1[0],
-      c1p[0], c1p[1], c1p[2], c1p[3], c1c[0], c1c[1], c1c[2], c1c[3],
+      l[0],
+      l[1],
+      l[2],
+      r[0],
+      r[1],
+      r[2],
+      p1[0],
+      c1p[0],
+      c1p[1],
+      c1p[2],
+      c1p[3],
+      c1c[0],
+      c1c[1],
+      c1c[2],
+      c1c[3],
     ] as FieldVar[];
     let next = [
-      rem[0], rem[1], q[0], q[1], q[2], quotientHiBound, p1[1], p1[2],
-      c1p[4], c1p[5], c1p[6], carry0,
+      rem[0],
+      rem[1],
+      q[0],
+      q[1],
+      q[2],
+      quotientHiBound,
+      p1[1],
+      p1[2],
+      c1p[4],
+      c1p[5],
+      c1p[6],
+      carry0,
     ] as FieldVar[];
     recorder.constraints.push({
       kind: 'foreign_field_mul',
@@ -1062,8 +1221,17 @@ async function recordCircuit(
     });
     return original.foreignFieldMul.call(
       gates,
-      left, right, remainder, quotient, quotientHiBound, product1,
-      carry0, carry1p, carry1c, mod2, negMod
+      left,
+      right,
+      remainder,
+      quotient,
+      quotientHiBound,
+      product1,
+      carry0,
+      carry1p,
+      carry1c,
+      mod2,
+      negMod
     );
   };
   for (let name of unsupportedGates) {
@@ -1071,6 +1239,8 @@ async function recordCircuit(
     if (typeof gate !== 'function') continue;
     originalGates.set(name, gate);
     (gates as Record<string, unknown>)[name] = (...args: unknown[]) => {
+      if (insideWitnessCallback())
+        return (gate as (...a: unknown[]) => unknown).call(gates, ...args);
       // Inventory mode: collect every unsupported gate a circuit uses instead
       // of aborting at the first, then fall through to the original gate so
       // recording continues. Enabled by setting globalThis.__missingGates.
@@ -1091,19 +1261,15 @@ async function recordCircuit(
     };
   }
 
-  // A compile pass (validateWitness=false) only needs the constraint
-  // structure. Run it in constraint-system mode so no witness callback runs —
-  // no async fetch, `this.sender`, state-dependent assert or `Unconstrained`
-  // read executes, which is exactly what breaks real contracts at compile.
-  // The VK is unaffected: it depends only on the structure (verified — zeroing
-  // the witness leaves the VK unchanged).
-  let structureOnly = !validateWitness;
+  // Compile passes normally need only constraint structure and skip witness
+  // callbacks. Prove-time recording opts into `generateWitness` while keeping
+  // `validateWitness=false`: the Rust prover validates the resulting witness,
+  // and replaying Snarky's validators here would duplicate recorded gates.
+  let structureOnly = !generateWitness;
   structureOnlyPass = structureOnly;
-  if (structureOnly) setAllowEmptyUnconstrained(true);
+  if (!validateWitness) setAllowEmptyUnconstrained(true);
   let id = snarkContext.enter(
-    structureOnly
-      ? { inAnalyze: true, inCheckedComputation: true }
-      : { inCheckedComputation: true }
+    structureOnly ? { inAnalyze: true, inCheckedComputation: true } : { inCheckedComputation: true }
   );
   try {
     let finish = structureOnly
@@ -1230,7 +1396,11 @@ type RustPicklesBindings = {
   ) => unknown;
   rust_pickles_recorded_program_n1_envelope?: (handle: unknown) => string;
   rust_pickles_recorded_program_n2_envelope?: (handle: unknown) => string;
-  rust_pickles_seed_lagrange_basis?: (curve: string, domainLog2: number, bytes: Uint8Array) => boolean;
+  rust_pickles_seed_lagrange_basis?: (
+    curve: string,
+    domainLog2: number,
+    bytes: Uint8Array
+  ) => boolean;
   rust_pickles_export_lagrange_basis?: (curve: string, domainLog2: number) => Uint8Array;
   rust_pickles_prove_recorded_n2_over_base_handles?: (
     first: unknown,
@@ -1343,7 +1513,7 @@ type WasmRustPicklesBindings = Omit<
 };
 
 async function rustPicklesBindings(): Promise<RustPicklesBindings> {
-  if (getBackendPreference() === 'wasm') {
+  if (getBackendPreference() === 'wasm' && !useDirectNativeBindings()) {
     await initializeBindings();
     let rustWasm = wasm as unknown as WasmRustPicklesBindings;
     if (typeof rustWasm.rust_pickles_prove_recorded_base !== 'function') {
@@ -1385,7 +1555,7 @@ async function rustPicklesBindings(): Promise<RustPicklesBindings> {
 }
 
 async function runRustPickles<T>(run: () => T | Promise<T>): Promise<T> {
-  if (getBackendPreference() !== 'wasm') return run();
+  if (getBackendPreference() !== 'wasm' || useDirectNativeBindings()) return run();
   return withThreadPool(async () => run());
 }
 
@@ -1638,8 +1808,7 @@ async function proveRecordedN1OverKeepCompiled(
       ) {
         throw Error('Rust Pickles bindings do not expose shared program N1 proving.');
       }
-      let debugN1 =
-        typeof process !== 'undefined' ? process.env.O1JS_DEBUG_N1_STAGE : undefined;
+      let debugN1 = typeof process !== 'undefined' ? process.env.O1JS_DEBUG_N1_STAGE : undefined;
       if (debugN1 !== undefined) {
         let bisect = (
           bindings as unknown as {
@@ -2103,7 +2272,8 @@ async function compileRecordedProgram(
   // `recorder.circuit()` ran — the `witness` arrays keep growing. Finalize
   // aux_count now that every branch (and its deferred constraints) is recorded.
   for (let entry of recorded) entry.circuit.aux_count = entry.witness.length;
-  if (profile) console.error(`[o1js compile] recording: ${(performance.now() - tRecord).toFixed(0)}ms`);
+  if (profile)
+    console.error(`[o1js compile] recording: ${(performance.now() - tRecord).toFixed(0)}ms`);
   let branchDump =
     typeof process !== 'undefined' ? process.env.O1JS_DUMP_PROGRAM_BRANCHES : undefined;
   if (branchDump !== undefined) {
@@ -2124,7 +2294,9 @@ async function compileRecordedProgram(
     let tPhase = performance.now();
     let bindings = await rustPicklesBindings();
     if (profile)
-      console.error(`[o1js compile] wasm bindings init: ${(performance.now() - tPhase).toFixed(0)}ms`);
+      console.error(
+        `[o1js compile] wasm bindings init: ${(performance.now() - tPhase).toFixed(0)}ms`
+      );
     tPhase = performance.now();
     // Read the cache entries on the main thread, but run the wasm-side
     // seeding inside the worker pool: the first seed call materializes the
@@ -2133,13 +2305,18 @@ async function compileRecordedProgram(
     let lagrangeSeeds = readSrsCacheSeeds(cache);
     let seedInPool = () => seedLagrangeCaches(bindings, lagrangeSeeds);
     if (profile)
-      console.error(`[o1js compile] read srs cache entries: ${(performance.now() - tPhase).toFixed(0)}ms`);
+      console.error(
+        `[o1js compile] read srs cache entries: ${(performance.now() - tPhase).toFixed(0)}ms`
+      );
     let hasRecursion = branches.some((branch) => branch.proofsVerified > 0);
-    if (hasRecursion && bindings.rust_pickles_compile_recorded_program_shared !== undefined) {
+    let needsSharedProgram = hasRecursion || branches.length > 1;
+    if (needsSharedProgram && bindings.rust_pickles_compile_recorded_program_shared !== undefined) {
       // OCaml `Pickles.compile` shape: ONE shared wrap circuit and canonical
-      // verification key for the whole program. Programs without recursion
-      // keep the width-0 per-branch path, whose wrap (2^13) is already
-      // bit-identical to jsoo's.
+      // verification key for the whole program. A single N0 branch can keep
+      // the cheaper standalone base path; multiple N0 branches need the
+      // shared width-0 program as well, otherwise their proofs are made
+      // against per-method Wrap keys and cannot authorize the canonical zkApp
+      // verification key.
       tPhase = performance.now();
       let branchesJson = JSON.stringify(
         recorded.map((entry, i) => ({
@@ -2152,8 +2329,7 @@ async function compileRecordedProgram(
         console.error(
           `[o1js compile] branches JSON: ${(performance.now() - tPhase).toFixed(0)}ms (${(branchesJson.length / 1e6).toFixed(1)}MB)`
         );
-      let debugProbe =
-        typeof process !== 'undefined' ? process.env.O1JS_DEBUG_PROBE : undefined;
+      let debugProbe = typeof process !== 'undefined' ? process.env.O1JS_DEBUG_PROBE : undefined;
       if (debugProbe !== undefined) {
         let [branchIndex, mode] = debugProbe.split(',').map(Number);
         let probe = (
@@ -2252,9 +2428,10 @@ async function compileRecordedProgram(
       tPhase = performance.now();
       let verificationKey: CanonicalVkEnvelope | undefined;
       if (bindings.rust_pickles_recorded_program_vk_envelope !== undefined) {
-        let envelope = JSON.parse(
-          bindings.rust_pickles_recorded_program_vk_envelope(program)
-        ) as { base64: string; hash: string };
+        let envelope = JSON.parse(bindings.rust_pickles_recorded_program_vk_envelope(program)) as {
+          base64: string;
+          hash: string;
+        };
         verificationKey = { data: envelope.base64, hash: envelope.hash };
       }
       if (profile)
@@ -2262,7 +2439,9 @@ async function compileRecordedProgram(
       tPhase = performance.now();
       persistLagrangeCaches(bindings, cache);
       if (profile)
-        console.error(`[o1js compile] persist lagrange: ${(performance.now() - tPhase).toFixed(0)}ms`);
+        console.error(
+          `[o1js compile] persist lagrange: ${(performance.now() - tPhase).toFixed(0)}ms`
+        );
       tPhase = performance.now();
       let envelopes = await Promise.all(
         recorded.map((entry, i) =>
@@ -2430,7 +2609,9 @@ async function compileRecordedProgram(
         curve,
         domainLog2 === -1 ? undefined : domainLog2
       );
-      return payloadBase64 == null ? undefined : new Uint8Array(Buffer.from(payloadBase64, 'base64'));
+      return payloadBase64 == null
+        ? undefined
+        : new Uint8Array(Buffer.from(payloadBase64, 'base64'));
     });
   } catch {
     // persisting is best-effort
