@@ -1304,7 +1304,14 @@ async function recordCircuit(
     // lc new vars after `recorder.circuit()` ran; finalize aux_count now that
     // every constraint has been recorded.
     circuit.aux_count = recorder.witness.length;
-    return { circuit, witness: recorder.witness };
+    let recording = { circuit, witness: recorder.witness };
+    let observer = (globalThis as Record<string, unknown>).__rustPicklesRecordingObserver;
+    if (typeof observer === 'function') {
+      (
+        observer as (recording: { circuit: RecordedCircuitJson; witness: string[] }) => void
+      )(recording);
+    }
+    return recording;
   } finally {
     structureOnlyPass = false;
     setAllowEmptyUnconstrained(false);
