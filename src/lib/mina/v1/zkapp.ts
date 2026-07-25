@@ -196,6 +196,18 @@ type RustZkappMethod = (
   ...args: unknown[]
 ) => Promise<unknown>;
 
+// Rust backend only. The proofs a method verifies, read off its argument types.
+// `analyzeMethod` collects the same set by declaring them while it executes the
+// body; the recording below re-declares them and compile cross-checks the two,
+// so the body never has to be executed a second time just to count them.
+function proofsFromMethodArgs(methodIntf: MethodInterface): ProofClass[] {
+  return methodIntf.args.flatMap((type) =>
+    extractProofs(ProvableType.synthesize(type)).map(
+      (proof) => proof.constructor as unknown as ProofClass
+    )
+  );
+}
+
 // Rust backend only. Records ONE zkApp method circuit into the recorder
 // envelope. Shared by compile (no `values` → synthesized dummy witness, and
 // the closure flags the run as `inAnalyze`) and prove (`values` carries the
@@ -203,12 +215,15 @@ type RustZkappMethod = (
 // canonical `inProver` mode so state and transaction reads use live values.
 // The recorder itself ignores constraint-like work performed inside witness
 // callbacks, matching Snarky's circuit boundary and keeping both shapes equal.
+// `report`, when passed, receives what compile would otherwise learn from a
+// separate `analyzeMethods()` run of the same body.
 function recordedZkappMethodCircuit(
   methods: RustZkappMethod[],
   methodIntfs: MethodInterface[],
   index: number,
   maxProofsVerified: number,
-  values?: { publicInput: ZkappPublicInput; args: unknown[]; proverData: unknown }
+  values?: { publicInput: ZkappPublicInput; args: unknown[]; proverData: unknown },
+  report?: { declaredProofs?: number }
 ): () => Promise<Field[]> {
   return async () => {
     let intf = methodIntfs[index];
@@ -273,6 +288,9 @@ function recordedZkappMethodCircuit(
           return [{ proof: i, vkHash: vk.hash }];
         })
       );
+      if (report !== undefined) {
+        report.declaredProofs = ZkProgramContext.getDeclaredProofs().length;
+      }
     } finally {
       snarkContext.leave(snarkId);
       ZkProgramContext.leave(id);
@@ -725,6 +743,9 @@ class SmartContract extends SmartContractBase {
   // the installed provers can prove transactions against them. Disposed and
   // rebuilt on every recompile.
   static _rustCompiledMethods?: RecordedCompiledCircuit[];
+  // Rust backend only: derived by compile from the method argument types, so
+  // that proving never falls back to the `analyzeMethods()` pass.
+  static _rustMaxProofsVerified?: 0 | 1 | 2;
 
   /**
    * Returns a Proof type that belongs to this {@link SmartContract}.
@@ -780,13 +801,19 @@ class SmartContract extends SmartContractBase {
         await (instance as any)[methodName](publicInput, ...args);
       };
     });
-    // run methods once to get information that we need already at compile time
-    let methodsMeta = await this.analyzeMethods();
-    let gates = methodKeys.map((k) => methodsMeta[k].gates);
-    let proofs = methodKeys.map((k) => methodsMeta[k].proofs);
+    // run methods once to get information that we need already at compile time.
+    // The rust path skips this: it records — and therefore executes — every
+    // method body below, so running them again here is the single largest
+    // avoidable compile cost. All it needs up front is the proof count, which
+    // comes from the argument types and is cross-checked against the recording.
+    let useRustBackend = getProofSystemBackend() === 'rust';
+    let methodsMeta = useRustBackend ? undefined : await this.analyzeMethods();
+    let proofs = useRustBackend
+      ? methodIntfs.map(proofsFromMethodArgs)
+      : methodKeys.map((k) => methodsMeta![k].proofs);
     let maxProofsVerified = computeMaxProofsVerified(proofs.map((p) => p.length));
 
-    if (getProofSystemBackend() === 'rust') {
+    if (useRustBackend) {
       // Rust backend: record each method circuit, extract the canonical
       // side-loaded VK (the on-chain zkApp key), and KEEP the compiled
       // branches alive so the installed provers can prove transactions
@@ -807,13 +834,21 @@ class SmartContract extends SmartContractBase {
         },
       });
       let compiledBranches: RecordedCompiledCircuit[];
+      let reports = methodIntfs.map((): { declaredProofs?: number } => ({}));
       try {
         compiledBranches = await compileRecordedProgram(
           methodIntfs.map((intf, i) => ({
             // No `values` → the closure synthesizes dummy witnesses. The
             // constraint shape is witness-independent, so it is byte-identical
             // to the prove-time re-recording below.
-            circuit: recordedZkappMethodCircuit(methods, methodIntfs, i, maxProofsVerified),
+            circuit: recordedZkappMethodCircuit(
+              methods,
+              methodIntfs,
+              i,
+              maxProofsVerified,
+              undefined,
+              reports[i]
+            ),
             proofsVerified: proofs[i].length as 0 | 1 | 2,
           })),
           cache
@@ -821,6 +856,19 @@ class SmartContract extends SmartContractBase {
       } finally {
         setActiveInstance(previousInstance);
       }
+      // The proof count came from the argument types; a body that declares a
+      // proof of its own would make the recorded shape disagree with the branch
+      // we just compiled, so fail here instead of shipping a wrong key.
+      methodIntfs.forEach((intf, i) => {
+        let declared = reports[i].declaredProofs;
+        if (declared !== undefined && declared !== proofs[i].length) {
+          for (let branch of compiledBranches) branch.dispose?.();
+          throw Error(
+            `rust backend: ${intf.methodName}() declares ${declared} proof(s) while its arguments ` +
+              `carry ${proofs[i].length}; a method must take every proof it verifies as an argument.`
+          );
+        }
+      });
       let canonicalVk =
         compiledBranches.length > 0 &&
         compiledBranches.every(
@@ -842,6 +890,9 @@ class SmartContract extends SmartContractBase {
         for (let branch of this._rustCompiledMethods) branch.dispose?.();
       }
       this._rustCompiledMethods = compiledBranches;
+      // Proving reads this back (see getMaxProofsVerified): without it, the
+      // first proof would run the `analyzeMethods()` pass compile just skipped.
+      this._rustMaxProofsVerified = maxProofsVerified;
       let verificationKey = new VerificationKey({
         data: canonicalVk.data,
         hash: Field(BigInt(canonicalVk.hash)),
@@ -863,6 +914,9 @@ class SmartContract extends SmartContractBase {
       return { verificationKey, provers: provers as any, verify };
     }
 
+    // Recompiling on the OCaml backend invalidates what the rust path cached.
+    this._rustMaxProofsVerified = undefined;
+    let gates = methodKeys.map((k) => methodsMeta![k].gates);
     let { verificationKey, provers, verify } = await compileProgram({
       publicInputType: ZkappPublicInput,
       publicOutputType: Empty,
@@ -898,6 +952,10 @@ class SmartContract extends SmartContractBase {
    * This is an internal parameter needed by the proof system.
    */
   static async getMaxProofsVerified() {
+    // Cached by the rust compile path, which derives it from the method
+    // argument types. Proving calls this for every account update, so falling
+    // through would execute every method body again.
+    if (this._rustMaxProofsVerified !== undefined) return this._rustMaxProofsVerified;
     let methodData = await this.analyzeMethods();
     return computeMaxProofsVerified(Object.values(methodData).map((d) => d.proofs.length));
   }
