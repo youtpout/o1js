@@ -2539,16 +2539,11 @@ async function compileRecordedProgram(
       recorded.map((entry, i) => compileRecordedEnvelope(entry, cache, branches[i].proofsVerified))
     );
   }
-  // OCaml `Pickles.compile` gives an all-N0 program the width-0 wrap
-  // (2^13, maxProofsVerified = 0). The shared program pipeline bootstraps
-  // width-2 machinery and reports a wider wrap, so route non-recursive
-  // programs through the per-branch width-0 path — the same rule the
-  // non-runtime branch above applies.
-  if (!branches.some((branch) => branch.proofsVerified > 0)) {
-    return Promise.all(
-      recorded.map((entry, i) => compileRecordedEnvelope(entry, cache, branches[i].proofsVerified))
-    );
-  }
+  // An all-N0 program used to be routed per-branch here, because the shared
+  // pipeline bootstrapped width-2 machinery and reported a wider wrap than
+  // OCaml `Pickles.compile` gives such a program. The runtime now compiles
+  // it as a base program with the canonical width-0 shared wrap, so routing
+  // it per-branch would hand every method its own verification key.
   let client = await minaRuntimeClient();
   let tRust = performance.now();
   // SRS/Lagrange cache: same entries and gating as jsoo (best-effort — an
