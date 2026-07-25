@@ -44,6 +44,7 @@ import {
   compileRecorded,
   compileRecordedN1Over,
   compileRecordedProgram,
+  profileCompileEnabled,
   proveRecordedBaseCase,
   proveRecordedBaseCaseKeep,
   proveRecordedN1,
@@ -543,8 +544,7 @@ function ZkProgram<
     doProving = proofsEnabled ?? doProving;
 
     if (doProving) {
-      let profileCompile =
-        typeof process !== 'undefined' && process.env.O1JS_PROFILE_COMPILE !== undefined;
+      let profileCompile = profileCompileEnabled();
       let tAnalyze = performance.now();
       let methodsMeta = await analyzeMethods();
       if (profileCompile)

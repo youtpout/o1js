@@ -36,6 +36,7 @@ export {
   compileRecorded,
   compileRecordedN1Over,
   compileRecordedProgram,
+  profileCompileEnabled,
   declareRecordedPreviousProofWidths,
   declareRecordedPreviousState,
   declareRecordedSideLoadedVks,
@@ -247,6 +248,9 @@ type DirectRustCompiled = {
 };
 
 type CanonicalVkEnvelope = { data: string; hash: string };
+/// Opaque handle to branches the rust side has already parsed, carrying the
+/// cache id derived from them. Consumed by whichever compile it is handed to.
+type PreparedBranches = { readonly cache_key: string };
 type MinaRuntimeCompiled = {
   client: MinaRuntimeClient;
   circuitId: number;
@@ -2258,6 +2262,18 @@ function persistLagrangeCaches(bindings: RustPicklesBindings, cache: Cache) {
   );
 }
 
+/**
+ * Whether compile prints its per-stage breakdown. Web workers have no env, so the
+ * browser opts in through `globalThis.O1JS_PROFILE_COMPILE` — the only place the
+ * compile actually runs there.
+ */
+function profileCompileEnabled() {
+  if (typeof process !== 'undefined' && process.env?.O1JS_PROFILE_COMPILE !== undefined) {
+    return true;
+  }
+  return (globalThis as { O1JS_PROFILE_COMPILE?: unknown }).O1JS_PROFILE_COMPILE !== undefined;
+}
+
 async function compileRecordedProgram(
   branches: {
     circuit: () => Field[] | Promise<Field[]>;
@@ -2265,7 +2281,7 @@ async function compileRecordedProgram(
   }[],
   cache: Cache = Cache.FileSystemDefault
 ): Promise<RecordedCompiledCircuit[]> {
-  let profile = typeof process !== 'undefined' && process.env.O1JS_PROFILE_COMPILE !== undefined;
+  let profile = profileCompileEnabled();
   let tRecord = performance.now();
   let recorded: Awaited<ReturnType<typeof recordCircuit>>[] = [];
   for (let branch of branches) {
@@ -2381,8 +2397,29 @@ async function compileRecordedProgram(
           json: string,
           bytes: Uint8Array
         ) => unknown;
+        // Parses the branches once and keeps them on the wasm side. The payload
+        // is multiple megabytes and the boundary costs ~90ms/MB to cross, so
+        // handing back a handle (instead of taking the JSON again for the
+        // restore) pays for itself several times over. Absent on transports
+        // that only expose the JSON entry points.
+        rust_pickles_prepare_recorded_program?: (json: string) => PreparedBranches;
+        rust_pickles_compile_prepared_program_from_cache_bytes?: (
+          prepared: PreparedBranches,
+          bytes: Uint8Array
+        ) => unknown;
+        rust_pickles_compile_prepared_program?: (prepared: PreparedBranches) => unknown;
       };
-      let programCacheKey = b.rust_pickles_recorded_program_cache_key?.(branchesJson);
+      let canPrepare =
+        b.rust_pickles_prepare_recorded_program !== undefined &&
+        b.rust_pickles_compile_prepared_program_from_cache_bytes !== undefined &&
+        b.rust_pickles_compile_prepared_program !== undefined;
+      let prepared = canPrepare
+        ? b.rust_pickles_prepare_recorded_program!(branchesJson)
+        : undefined;
+      let programCacheKey =
+        prepared !== undefined
+          ? prepared.cache_key
+          : b.rust_pickles_recorded_program_cache_key?.(branchesJson);
       let programCacheHeader =
         programCacheKey === undefined
           ? undefined
@@ -2402,25 +2439,37 @@ async function compileRecordedProgram(
         programCacheHeader === undefined ? undefined : readCache(cache, programCacheHeader);
       if (
         cachedProgramBytes !== undefined &&
-        b.rust_pickles_compile_recorded_program_from_cache_bytes !== undefined
+        (prepared !== undefined ||
+          b.rust_pickles_compile_recorded_program_from_cache_bytes !== undefined)
       ) {
         try {
           program = await runRustPickles(() => {
             seedInPool();
-            return b.rust_pickles_compile_recorded_program_from_cache_bytes!(
-              branchesJson,
-              cachedProgramBytes
-            );
+            return prepared !== undefined
+              ? b.rust_pickles_compile_prepared_program_from_cache_bytes!(
+                  prepared,
+                  cachedProgramBytes
+                )
+              : b.rust_pickles_compile_recorded_program_from_cache_bytes!(
+                  branchesJson,
+                  cachedProgramBytes
+                );
           });
           restoredFromCache = true;
         } catch {
           program = undefined; // stale/corrupt cache entry: recompile
+          // A failed restore consumed the handle along with its branches.
+          prepared = canPrepare
+            ? b.rust_pickles_prepare_recorded_program!(branchesJson)
+            : undefined;
         }
       }
       if (program === undefined) {
         program = await runRustPickles(() => {
           seedInPool();
-          return bindings.rust_pickles_compile_recorded_program_shared!(branchesJson);
+          return prepared !== undefined
+            ? b.rust_pickles_compile_prepared_program!(prepared)
+            : bindings.rust_pickles_compile_recorded_program_shared!(branchesJson);
         });
       }
       if (
