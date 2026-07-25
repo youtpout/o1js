@@ -2310,7 +2310,15 @@ async function compileRecordedProgram(
     // tick/tock SRS, whose parallel creation needs pool threads (and the
     // main thread must not block in browsers).
     let lagrangeSeeds = readSrsCacheSeeds(cache);
-    let seedInPool = () => seedLagrangeCaches(bindings, lagrangeSeeds);
+    // Seeding runs on every compile, unlike the jsoo backend which read the
+    // SRS once per process. Time it separately so the cost stays visible
+    // instead of hiding inside the restore total.
+    let seedMillis = 0;
+    let seedInPool = () => {
+      let tSeed = performance.now();
+      seedLagrangeCaches(bindings, lagrangeSeeds);
+      seedMillis += performance.now() - tSeed;
+    };
     if (profile)
       console.error(
         `[o1js compile] read srs cache entries: ${(performance.now() - tPhase).toFixed(0)}ms`
@@ -2430,7 +2438,7 @@ async function compileRecordedProgram(
       }
       if (profile)
         console.error(
-          `[o1js compile] rust shared program ${restoredFromCache ? 'cache restore' : 'compile'} (incl. seed): ${(performance.now() - tPhase).toFixed(0)}ms`
+          `[o1js compile] rust shared program ${restoredFromCache ? 'cache restore' : 'compile'}: ${(performance.now() - tPhase - seedMillis).toFixed(0)}ms (+ seed ${seedMillis.toFixed(0)}ms)`
         );
       tPhase = performance.now();
       let verificationKey: CanonicalVkEnvelope | undefined;
