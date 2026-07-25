@@ -128,12 +128,17 @@ class MinaRuntimeClient {
   }
 
   /** Exports the runtime's in-process SRS (`domainLog2` absent) or a
-   * Lagrange basis as an o1js `Cache` entry payload (jsoo JSON, base64);
-   * `payloadBase64` is null-ish when not materialized yet. */
+   * Lagrange basis as an o1js `Cache` entry payload (base64);
+   * `payloadBase64` is null-ish when not materialized yet.
+   *
+   * The compact layout is written: it holds the same points in about a third
+   * of the bytes of the jsoo JSON, which spells each coordinate in decimal.
+   * Seeding accepts either, so an existing cache keeps working. */
   exportSrsCache(curve: 'vesta' | 'pallas', domainLog2?: number) {
     return this.#execute<{ payloadBase64?: string | null }>('exportSrsCache', {
       curve,
       domainLog2,
+      raw: true,
     });
   }
 
